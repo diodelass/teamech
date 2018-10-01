@@ -1,5 +1,50 @@
 // Teamech v 0.7.1 September 2018
 
+/*
+Feature Outline
+
+Functionality														Implemented
+
+I. Server																		[ ]
+	A. Subscriptions													[ ]
+		1. Acceptance														[X]
+		2. Cancellation													[X]
+			a. Upon request												[X]
+			b. Upon absence												[X]
+			c. Upon misbehavior										[ ]
+		3. Banning															[ ]
+		4. Identifiers													[X]
+			a. Names (unique)											[X]
+				i. Setting													[X]
+				ii. Changing												[X]
+			b. Classes (nonunique)								[X]
+				i. Setting													[X]
+				ii. Unsetting												[X]
+	B. Relaying																[X]
+		1. To all clients												[X]
+		2. To specific clients									[X]
+		3. To sets of clients										[X]
+		4. To other servers											[X]
+		5. Handling acknowledgements						[ ]
+			a. Resending													[ ]
+	C. Server-Server Links										[X]
+		1. Opening															[X] 
+		2. Closing															[ ]
+II. Client																	[ ]
+	A. Subscribing														[ ]
+		1. Opening subscription									[X]
+		2. Closing subscription									[X]
+		3. Responding to closure								[ ]
+	B. Sending																[X]
+	C. Receiving															[X]
+III. Security																[ ]
+	A. Encryption															[X]
+	B. Decryption															[X]
+	C. Validation															[X]
+	D. Incident Logs													[ ]
+
+*/
+
 extern crate rand;
 
 extern crate tiny_keccak;
@@ -17,16 +62,6 @@ use std::fs::File;
 use std::collections::{VecDeque,HashMap};
 use std::time::Duration;
 use std::net::{UdpSocket,SocketAddr};
-
-// converts a collection of bytes into UTF-8 characters
-fn bytes_to_chars(bytes:&Vec<u8>) -> Vec<char> {
-	return String::from_utf8_lossy(&bytes).chars().collect::<Vec<char>>();
-}
-
-// converts a collection of UTF-8 characters into bytes
-fn chars_to_bytes(chars:&Vec<char>) -> Vec<u8> {
-	return chars.iter().collect::<String>().as_bytes().to_vec();
-}
 
 // converts a signed 64-bit int into eight bytes
 fn i64_to_bytes(number:&i64) -> [u8;8] {
@@ -52,14 +87,6 @@ fn bytes_to_u64(bytes:&[u8;8]) -> u64 {
 	return bytes.as_ref().read_u64::<LittleEndian>().expect("failed to convert bytes to u64");
 }
 
-fn hash_bytes(input:&Vec<u8>) -> [u8;8] {
-	let result:[u8;8] = [0;8];
-	let mut sha3 = Keccak::new_sha3_256();
-	sha3.update(&input);
-	sha3.finalize(&mut result);
-	return result;
-}
-
 // accepts a boolean expression in the form `(foo|bar)&baz` and determines if it matches a 
 // string of words in the form `foo bar baz`
 // edge cases:
@@ -67,16 +94,21 @@ fn hash_bytes(input:&Vec<u8>) -> [u8;8] {
 // - a malformed or unparseable pattern will return false
 // - words containing boolean operators cannot be matched and should not be included
 fn wordmatch(pattern:&str,input:&str) -> bool {
-	if pattern == "" || input.contains(&pattern) {
+	if pattern == "" || pattern == "@" || input.contains(&pattern) {
+		// handle true-returning edge cases first, for speed
 		return true;
 	}
 	let paddedinput:&str = &format!(" {} ",input);
-	let ops:Vec<&str> = vec!["!","&","|","^","(",")"];
+	let ops:Vec<&str> = vec!["/","!","&","|","^","(",")"];
 	let mut fixedpattern:String = String::from(pattern);
 	for c in ops.iter() {
+		// first, pad all the operators with spaces to make them come up as their own elements
+		// when the string is split on whitespace.
 		fixedpattern = fixedpattern.replace(c,&format!(" {} ",c));
 	}
 	for element in fixedpattern.clone().split_whitespace() {
+		// replace all the terms of the expression with "1" or "0" depending on whether they 
+		// individually match the input.
 		let paddedelement:&str = &format!(" {} ",element);
 		if !ops.contains(&element) {
 			if paddedinput.contains(&paddedelement) {
@@ -86,9 +118,17 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 			}
 		}
 	}
+	// now the expression consists only of operators, "1", and "0".
+	// we remove whatever space padding is left, and start condensing it.
 	fixedpattern = fixedpattern.replace(" ","");
 	fixedpattern = fixedpattern.replace("/","&");
 	loop {
+		// expression evaluation works by replacing combinations of operators and arguments
+		// with their results. this method is perhaps not as fast as it could be, but it
+		// makes for some nice simple code. it's also easy to set up order-of-operations
+		// behavior and handle parentheses correctly.
+		// this would naturally not be an option with decimal numbers or other arguments which
+		// have unlimited possible values, but for booleans, it's still fairly concise.
 		let mut subpattern:String = fixedpattern.clone();
 		// NOT
 		subpattern = subpattern.replace("!0","1");
@@ -134,8 +174,14 @@ pub struct Crypt {
 	pad_length:usize,
 }
 
-// constructor for a Crypt object. opens a pad file, reads it into
-// memory, and returns a Crypt object containing the data.
+// constructor for a Crypt object. opens a pad file, reads it into memory, and returns 
+// a Crypt object containing the data.
+// calling this function will cause the program's memory usage to quickly increase by
+// the size of the pad file, and will block until the pad file has finished loading - 
+// this would be a good time to let the user know that a long operation is about to 
+// happen, especially if they are using a very large pad file and/or a slow disk.
+// TODO: add runtime option to not load the pad file and instead always access it in-place.
+// TODO: add support for raw block devices as pad files.
 pub fn new_crypt(new_pad_path:&str) -> Result<Crypt,io::Error> {
 	let mut new_pad_data:Vec<u8> = Vec::new();
 	match File::open(&new_pad_path) {
@@ -283,8 +329,9 @@ pub struct Client {
 	classes:Vec<String>,
 	crypt:Crypt,
 	receive_queue:VecDeque<Packet>,
+	unacked_packets:HashMap<[u8;8],(Vec<u8>,i64)>,
 	uptime:i64,
-	last_activity:i64,
+	time_tolerance_ms:i64,
 	synchronous:bool,
 }
 
@@ -303,16 +350,19 @@ pub fn new_client(pad_path:&str,server_address:SocketAddr,local_port:u16) -> Res
 			name:String::new(),
 			classes:Vec::new(),
 			receive_queue:VecDeque::new(),
+			unacked_packets:HashMap::new(),
 			crypt:new_crypt,
 			uptime:Local::now().timestamp_millis(),
-			last_activity:Local::now().timestamp_millis(),
-			synchronous:false,
+			time_tolerance_ms:3000,
+			synchronous:true,
 		}),
 	};
 }
 
 impl Client {
 
+	// set the socket to blocking mode, meaning the program will sit idle on calls to
+	// get_packets() until packets are available. this is the default.
 	pub fn set_synchronous(&mut self) -> Result<(),io::Error> {
 		match self.socket.set_read_timeout(None) {
 			Err(why) => return Err(why),
@@ -323,6 +373,9 @@ impl Client {
 		};
 	}
 
+	// set the socket to nonblocking mode, meaning the program will wait for a certain
+	// interval during get_packets calls, then move on to something else if no packets
+	// are received. the timeout must be specified as an argument.
 	pub fn set_asynchronous(&mut self,wait_time_ms:u64) -> Result<(),io::Error> {
 		match self.socket.set_read_timeout(Some(Duration::new(wait_time_ms/1000,(wait_time_ms%1000) as u32))) {
 			Err(why) => return Err(why),
@@ -333,69 +386,87 @@ impl Client {
 		}
 	}
 
+	pub fn decrypt_packet(&self,bottle:&Vec<u8>,source_address:&SocketAddr) -> Packet {
+		let now:i64 = Local::now().timestamp_millis();
+		let mut decrypted_bytes:Vec<u8> = Vec::new();
+		let mut timestamp:i64 = 0;
+		let mut message_valid:bool = false;
+		let mut sender_bytes:Vec<u8> = Vec::new();
+		let mut parameter_bytes:Vec<u8> = Vec::new();
+		let mut payload_bytes:Vec<u8> = Vec::new();
+		if bottle.len() >= 24 {
+			let decryption = self.crypt.decrypt(&bottle);
+			decrypted_bytes = decryption.0;
+			timestamp = decryption.1;
+			message_valid = decryption.2;
+		}
+		if decrypted_bytes.len() >= 2 {
+			// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
+			// and nonce. everything from the end of the parameter string to the last byte is the payload.
+			let sender_length:usize = decrypted_bytes[0] as usize;
+			if sender_length+2 <= decrypted_bytes.len() {
+				for scan_position in 1..sender_length+1 {
+					sender_bytes.push(decrypted_bytes[scan_position]);
+				}
+			}
+			let parameter_length:usize = decrypted_bytes[sender_length+1] as usize;
+			if sender_length+parameter_length+2 <= decrypted_bytes.len() {
+				for scan_position in sender_length+2..sender_length+parameter_length+2 {
+					parameter_bytes.push(decrypted_bytes[scan_position]);
+				}
+				for scan_position in sender_length+parameter_length+2..decrypted_bytes.len() {
+					payload_bytes.push(decrypted_bytes[scan_position]);
+				}
+			}
+		}
+		if timestamp > now+self.time_tolerance_ms || timestamp < now-self.time_tolerance_ms {
+			message_valid = false;
+		}
+		return Packet {
+			raw:bottle.clone(),
+			decrypted:decrypted_bytes,
+			valid:message_valid,
+			timestamp:timestamp,
+			source:source_address.clone(),
+			sender:sender_bytes,
+			parameter:parameter_bytes,
+			payload:payload_bytes,
+		}
+	}
+
+	// collect packets from the server and append them to our receive_queue. this function
+	// will block indefinitely if the client is in synchronous mode (the default), or give
+	// up after a set delay if it has been set to asynchronous mode. in asynchronous mode,
+	// the WouldBlock errors resulting from no new packets being available are suppressed,
+	// so they do not need to be handled in the implementation code.
 	pub fn get_packets(&mut self) -> Result<(),io::Error> {
 		let mut input_buffer:[u8;512] = [0;512];
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
 					io::ErrorKind::WouldBlock => break,
+					io::ErrorKind::Interrupted => break,
 					_ => return Err(why),
 				},
 				Ok((receive_length,source_address)) => {
 					if source_address == self.server_address {
-						let bottle:Vec<u8> = input_buffer[..receive_length].to_vec();
-						let mut decrypted_bytes:Vec<u8> = Vec::new();
-						let mut timestamp:i64 = 0;
-						let mut message_valid = false;
-						let mut sender_bytes:Vec<u8> = Vec::new();
-						let mut parameter_bytes:Vec<u8> = Vec::new();
-						let mut payload_bytes:Vec<u8> = Vec::new();
-						if receive_length >= 24 {
-							let decryption = self.crypt.decrypt(&bottle);
-							decrypted_bytes = decryption.0;
-							timestamp = decryption.1;
-							message_valid = decryption.2;
-						}
-						if decrypted_bytes.len() >= 2 {
-							// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
-							// and nonce. everything from the end of the parameter string to the last byte is the payload.
-							let sender_length:usize = decrypted_bytes[0] as usize;
-							if sender_length+2 <= decrypted_bytes.len() {
-								for scan_position in 1..sender_length+1 {
-									sender_bytes.push(decrypted_bytes[scan_position]);
-								}
-							}
-							let parameter_length:usize = decrypted_bytes[sender_length+1] as usize;
-							if sender_length+parameter_length+2 <= decrypted_bytes.len() {
-								for scan_position in sender_length+2..sender_length+parameter_length+2 {
-									parameter_bytes.push(decrypted_bytes[scan_position]);
-								}
-								for scan_position in sender_length+parameter_length+2..decrypted_bytes.len() {
-									payload_bytes.push(decrypted_bytes[scan_position]);
-								}
-							}
-						}
-						if message_valid {
-							match self.send_packet(&vec![0x06],&hash_bytes(&bottle).to_vec()) {
+						let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
+						let mut packet_hash:[u8;8] = [0;8];
+						let mut sha3 = Keccak::new_sha3_256();
+						sha3.update(&input_buffer[..receive_length]);
+						sha3.finalize(&mut packet_hash);
+						if received_packet.valid {
+							match self.send_packet(&vec![0x06],&packet_hash.to_vec()) {
 								Err(why) => return Err(why),
 								Ok(_) => (),
 							};
 						} else {
-							match self.send_packet(&vec![0x15],&hash_bytes(&bottle).to_vec()) {
+							match self.send_packet(&vec![0x15],&packet_hash.to_vec()) {
 								Err(why) => return Err(why),
 								Ok(_) => (),
 							};
 						}
-						self.receive_queue.push_back(Packet {
-							raw:bottle,
-							decrypted:decrypted_bytes,
-							valid:message_valid,
-							timestamp:timestamp,
-							source:source_address,
-							sender:sender_bytes,
-							parameter:parameter_bytes,
-							payload:payload_bytes,
-						});
+						self.receive_queue.push_back(received_packet);
 					}
 				},
 			};
@@ -406,28 +477,43 @@ impl Client {
 		return Ok(());
 	}
 
-	pub fn send_packet(&self,parameter:&Vec<u8>,payload:&Vec<u8>) -> Result<(),io::Error> {
+	// encrypts and transmits a payload of bytes to the server. total payload length
+	// (including sender string, parameter string, and message contents) cannot be more
+	// than 500 bytes; attempting to provide arguments that would exceed this limit will
+	// result in an io::ErrorKind::InvalidData.
+	pub fn send_packet(&mut self,parameter:&Vec<u8>,payload:&Vec<u8>) -> Result<(),io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		let mut primary_class:&str = "";
 		if self.classes.len() > 0 {
 			primary_class = &self.classes[0];
 		}
 		let mut sender:Vec<u8> = format!("@{}/#{}",&self.name,&primary_class).as_bytes().to_vec();
-		if sender.len() > 240 || parameter.len() > 240 {
-			return Err(io::Error::new(io::ErrorKind::InvalidData,"sender string too long"));
-		}
 		message.push(sender.len() as u8);
 		message.append(&mut sender);
 		message.push(parameter.len() as u8);
 		message.append(&mut parameter.clone());
 		message.append(&mut payload.clone());
 		let bottle:Vec<u8> = self.crypt.encrypt(&message);
-		match self.socket.send_to(&bottle[..],&self.server_address) {
-			Err(why) => return Err(why),
-			Ok(_) => return Ok(()),
+		if bottle.len() > 500 {
+			return Err(io::Error::new(io::ErrorKind::InvalidData,"payload too large"));
 		}
+		match self.send_raw(&bottle) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		if parameter.len() > 0 && parameter[0] == b'>' {
+			let mut packet_hash:[u8;8] = [0;8];
+			let mut sha3 = Keccak::new_sha3_256();
+			sha3.update(&bottle);
+			sha3.finalize(&mut packet_hash);
+			self.unacked_packets.insert(packet_hash,(bottle,Local::now().timestamp_millis()));
+		}
+		return Ok(());
 	}
 	
+	// transmits a raw vector of bytes without encryption or modification. remember that
+	// the server will reject all packets which are not encrypted and formatted correctly,
+	// so bytes passed to this function should be set up using other code.
 	pub fn send_raw(&self,message:&Vec<u8>) -> Result<(),io::Error> {
 		match self.socket.send_to(&message[..],&self.server_address) {
 			Err(why) => return Err(why),
@@ -435,64 +521,115 @@ impl Client {
 		};
 	}
 
-	pub fn subscribe(&self) -> Result<(),io::Error> {
+	// retransmit packets that haven't been acknowledged and were last sent a while ago.
+	pub fn resend_unacked(&mut self) -> Result<(),io::Error> {
+		let now:i64 = Local::now().timestamp_millis();
+		for unacked_packet in self.unacked_packets.clone().iter() {
+			let packet_hash:&[u8;8] = &unacked_packet.0;
+			let packet_contents:&Vec<u8> = &(unacked_packet.1).0;
+			let packet_timestamp:&i64 = &(unacked_packet.1).1;
+			// if the packet's timestamp is a while ago, resend it.
+			if *packet_timestamp < now-self.time_tolerance_ms {
+				match self.send_raw(&packet_contents) {
+					Err(why) => return Err(why),
+					Ok(_) => (),
+				};
+				self.unacked_packets.insert(packet_hash.clone(),(packet_contents.clone(),packet_timestamp.clone()));
+			}
+		}
+		return Ok(());
+	}
+
+	// transmits a subscription request packet. server will return 0x06 if
+	// we are already subscribed, 0x02 if we were not subscribed but are now,
+	// 0x15 if something's wrong (e.g. server full) or an unreadable packet
+	// if we have the wrong pad file.
+	pub fn subscribe(&mut self) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x02],&vec![]) {
 			Err(why) => return Err(why),
 			Ok(_) => return Ok(()),
 		};
 	}
 
-	pub fn unsubcribe(&self) -> Result<(),io::Error> {
+	// sends a cancellation of subscription to the server. server will return
+	// 0x19 if it hears us.
+	pub fn unsubcribe(&mut self) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x18],&vec![]) {
 			Err(why) => return Err(why),
 			Ok(_) => return Ok(()),
 		};
 	}
 
-	pub fn set_name(&self,name:&str) -> Result<(),io::Error> {
+	// updates the local 'name' (unique identifier) field in the client object, 
+	// and also sends the new name to the server.
+	pub fn set_name(&mut self,name:&str) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x01],&name.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
-			Ok(_) => return Ok(()),
+			Ok(_) => (),
 		};
+		self.name = name.to_owned();
+		return Ok(());
 	}
 
-	pub fn add_class(&self,class:&str) -> Result<(),io::Error> {
+	// adds an additional class (non-unique group identifier) to the local 
+	// 'classes' field, and sends the new class to the server.
+	pub fn add_class(&mut self,class:&str) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x11],&class.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
-			Ok(_) => return Ok(()),
+			Ok(_) => (),
 		};
+		self.classes.push(class.to_owned());
+		return Ok(());
 	}
 
-	pub fn remove_class(&self,class:&str) -> Result<(),io::Error> {
+	// removes a class from the local 'classes' field, and sends the removal to
+	// the server.
+	pub fn remove_class(&mut self,class:&str) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x12],&class.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
-			Ok(_) => return Ok(()),
+			Ok(_) => (),
 		};
+		for n in (0..self.classes.len()).rev() {
+			if &self.classes[n] == class {
+				self.classes.remove(n);
+			}
+		}
+		return Ok(());
 	}
 
 } // impl Client
 
+// subscription object for tracking subscribed clients. constructed only by the
+// receive_packets method when it receives a valid but unrecognized message 
+// (not intended to be constructed directly).
+#[derive(Clone)]
 pub struct Subscription {
 	address:SocketAddr,
 	name:String,
 	classes:Vec<String>,
 	uptime:i64,
-	unacked_packets:HashMap<[u8;8],Packet>,
+	unacked_packets:HashMap<[u8;8],(Vec<u8>,i64)>,
 }
 
+// server object for holding server parameters and subscriptions.
 pub struct Server {
+	name:String,
 	socket:UdpSocket,
 	subscribers:HashMap<SocketAddr,Subscription>,
+	max_subscribers:usize,
+	recent_packets:VecDeque<[u8;8]>,
+	max_recent_packets:usize,
+	max_unsent_packets:usize,
 	crypt:Crypt,
 	receive_queue:VecDeque<Packet>,
 	log_queue:VecDeque<String>,
 	uptime:i64,
-	last_activity:i64,
 	synchronous:bool,
 	time_tolerance_ms:i64
 }
 
-pub fn new_server(pad_path:&str,port:u16) -> Result<Server,io::Error> {
+// server constructor, works very similarly to client constructor
+pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> {
 	let new_crypt:Crypt = match new_crypt(&pad_path) {
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
@@ -500,14 +637,18 @@ pub fn new_server(pad_path:&str,port:u16) -> Result<Server,io::Error> {
 	match UdpSocket::bind(&format!("0.0.0.0:{}",port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => return Ok(Server {
+			name:name.to_owned(),
 			socket:socket,
 			subscribers:HashMap::new(),
+			max_subscribers:1024,
+			recent_packets:VecDeque::new(),
+			max_recent_packets:64,
+			max_unsent_packets:32,
 			crypt:new_crypt,
 			receive_queue:VecDeque::new(),
 			log_queue:VecDeque::new(),
 			uptime:Local::now().timestamp_millis(),
-			last_activity:Local::now().timestamp_millis(),
-			synchronous:false,
+			synchronous:true,
 			time_tolerance_ms:3000,
 		}),
 	};
@@ -515,6 +656,58 @@ pub fn new_server(pad_path:&str,port:u16) -> Result<Server,io::Error> {
 
 impl Server {
 
+	pub fn decrypt_packet(&self,bottle:&Vec<u8>,source_address:&SocketAddr) -> Packet {
+		let now:i64 = Local::now().timestamp_millis();
+		let mut decrypted_bytes:Vec<u8> = Vec::new();
+		let mut timestamp:i64 = 0;
+		let mut message_valid:bool = false;
+		let mut sender_bytes:Vec<u8> = Vec::new();
+		let mut parameter_bytes:Vec<u8> = Vec::new();
+		let mut payload_bytes:Vec<u8> = Vec::new();
+		if bottle.len() >= 24 {
+			let decryption = self.crypt.decrypt(&bottle);
+			decrypted_bytes = decryption.0;
+			timestamp = decryption.1;
+			message_valid = decryption.2;
+		}
+		if decrypted_bytes.len() >= 2 {
+			// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
+			// and nonce. everything from the end of the parameter string to the last byte is the payload.
+			let sender_length:usize = decrypted_bytes[0] as usize;
+			if sender_length+2 <= decrypted_bytes.len() {
+				for scan_position in 1..sender_length+1 {
+					sender_bytes.push(decrypted_bytes[scan_position]);
+				}
+			}
+			let parameter_length:usize = decrypted_bytes[sender_length+1] as usize;
+			if sender_length+parameter_length+2 <= decrypted_bytes.len() {
+				for scan_position in sender_length+2..sender_length+parameter_length+2 {
+					parameter_bytes.push(decrypted_bytes[scan_position]);
+				}
+				for scan_position in sender_length+parameter_length+2..decrypted_bytes.len() {
+					payload_bytes.push(decrypted_bytes[scan_position]);
+				}
+			}
+		}
+		if timestamp > now+self.time_tolerance_ms || timestamp < now-self.time_tolerance_ms {
+			message_valid = false;
+		}
+		return Packet {
+			raw:bottle.clone(),
+			decrypted:decrypted_bytes,
+			valid:message_valid,
+			timestamp:timestamp,
+			source:source_address.clone(),
+			sender:sender_bytes,
+			parameter:parameter_bytes,
+			payload:payload_bytes,
+		}
+	}
+
+	// similar to client sync/async settings. synchronous (the default) means the server
+	// will remain completely idle when there are no packets to process. this makes for 
+	// a lighter overall load on low-power systems, but also prevents the server from
+	// doing anything when there are no incoming packets.
 	pub fn set_synchronous(&mut self) -> Result<(),io::Error> {
 		match self.socket.set_read_timeout(None) {
 			Err(why) => return Err(why),
@@ -525,6 +718,11 @@ impl Server {
 		};
 	}
 
+	// similar to client sync/async settings. asynchronous means the server will poll for
+	// incoming packets, wait a specified interval, and then take a break to do other things
+	// before coming back to look again. when no packets are incoming, the server will perform
+	// other tasks once every timeout period.
+	// setting the timeout very low may result in high idle load.
 	pub fn set_asynchronous(&mut self,wait_time_ms:u64) -> Result<(),io::Error> {
 		match self.socket.set_read_timeout(Some(Duration::new(wait_time_ms/1000,(wait_time_ms%1000) as u32))) {
 			Err(why) => return Err(why),
@@ -535,11 +733,60 @@ impl Server {
 		}
 	}
 
-	pub fn send_packet(&self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,address:&SocketAddr) 
-		-> Result<(),io::Error> {
-		if sender.len() > 240 || parameter.len() > 240 {
-			return Err(io::Error::new(io::ErrorKind::InvalidData,"sender string too long"));
+	pub fn link_server(&mut self,remote_address:&SocketAddr) -> Result<(),io::Error> {
+		let server_name:String = self.name.clone();
+		let mut current_timeout:Option<Duration> = None;
+		if let Ok(timeout) = self.socket.read_timeout() {
+			current_timeout = timeout;
 		}
+		match self.socket.set_read_timeout(Some(
+			Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x02],&vec![],&remote_address) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		let mut input_buffer:[u8;512] = [0;512];
+		let wait_start:i64 = Local::now().timestamp_millis();
+		loop {
+			match self.socket.recv_from(&mut input_buffer) {
+				Err(why) => match why.kind() {
+					io::ErrorKind::WouldBlock => return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server")),
+					_ => return Err(why),
+				},
+				Ok((receive_length,source_address)) => {
+					let received_packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
+					if received_packet.parameter.len() > 0 && &source_address == remote_address {
+						match received_packet.parameter[0] {
+							0x06 => break,
+							0x02 => break,
+							0x15 => return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"connection refused by server")),
+							_ => continue,
+						}
+					}
+				},
+			};
+			if Local::now().timestamp_millis() > wait_start+self.time_tolerance_ms {
+				return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
+			}
+		}
+		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x12],&b"server".to_vec(),
+			&remote_address) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.socket.set_read_timeout(current_timeout) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		return Ok(());
+	}
+
+	// encrypts and transmits a packet, much like the client version.
+	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,address:&SocketAddr) 
+		-> Result<(),io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		message.push(sender.len() as u8);
 		message.append(&mut sender.clone());
@@ -547,12 +794,27 @@ impl Server {
 		message.append(&mut parameter.clone());
 		message.append(&mut payload.clone());
 		let bottle:Vec<u8> = self.crypt.encrypt(&message);
+		if bottle.len() > 500 {
+			return Err(io::Error::new(io::ErrorKind::InvalidData,"payload too large"));
+		}
 		match self.socket.send_to(&bottle[..],&address) {
 			Err(why) => return Err(why),
-			Ok(_) => return Ok(()),
+			Ok(_) => (),
 		}
+		if parameter.len() > 0 && parameter[0] == b'>' {
+			let mut packet_hash:[u8;8] = [0;8];
+			let mut sha3 = Keccak::new_sha3_256();
+			sha3.update(&bottle);
+			sha3.finalize(&mut packet_hash);
+			if let Some(sub) = self.subscribers.get_mut(&address) {
+				sub.unacked_packets.insert(packet_hash,(bottle,Local::now().timestamp_millis()));
+			}
+		}
+		return Ok(());
 	}
 	
+	// similar to the client version; sends a raw packet without modifying it. Will need to be pre-
+	// encrypted through some other means, or the client will reject it.
 	pub fn send_raw(&self,message:&Vec<u8>,address:&SocketAddr) -> Result<(),io::Error> {
 		match self.socket.send_to(&message[..],&address) {
 			Err(why) => return Err(why),
@@ -576,69 +838,57 @@ impl Server {
 					_ => return Err(why),
 				},
 				Ok((receive_length,source_address)) => {
+					let server_name:String = self.name.clone();
 					let now:i64 = Local::now().timestamp_millis();
-					let bottle:Vec<u8> = input_buffer[..receive_length].to_vec();
-					let mut decrypted_bytes:Vec<u8> = Vec::new();
-					let mut timestamp:i64 = 0;
-					let mut message_valid:bool = false;
-					let mut sender_bytes:Vec<u8> = Vec::new();
-					let mut parameter_bytes:Vec<u8> = Vec::new();
-					let mut payload_bytes:Vec<u8> = Vec::new();
-					if receive_length >= 24 {
-						let decryption = self.crypt.decrypt(&bottle);
-						decrypted_bytes = decryption.0;
-						timestamp = decryption.1;
-						message_valid = decryption.2;
-					}
-					if decrypted_bytes.len() >= 2 {
-						// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
-						// and nonce. everything from the end of the parameter string to the last byte is the payload.
-						let sender_length:usize = decrypted_bytes[0] as usize;
-						if sender_length+2 <= decrypted_bytes.len() {
-							for scan_position in 1..sender_length+1 {
-								sender_bytes.push(decrypted_bytes[scan_position]);
-							}
-						}
-						let parameter_length:usize = decrypted_bytes[sender_length+1] as usize;
-						if sender_length+parameter_length+2 <= decrypted_bytes.len() {
-							for scan_position in sender_length+2..sender_length+parameter_length+2 {
-								parameter_bytes.push(decrypted_bytes[scan_position]);
-							}
-							for scan_position in sender_length+parameter_length+2..decrypted_bytes.len() {
-								payload_bytes.push(decrypted_bytes[scan_position]);
-							}
+					let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
+					if !self.subscribers.contains_key(&source_address) {
+						if received_packet.valid && self.subscribers.len() < self.max_subscribers {
+							self.subscribers.insert(source_address.clone(),Subscription {
+								address:source_address.clone(),
+								name:String::new(),
+								classes:Vec::new(),
+								uptime:Local::now().timestamp_millis(),
+								unacked_packets:HashMap::new(),
+							});	
+							match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+								&vec![0x02],&vec![],&source_address) {
+								Err(why) => return Err(why),
+								Ok(_) => (),
+							};
+						} else {
+							match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+								&vec![0x15],&vec![],&source_address) {
+								Err(why) => return Err(why),
+								Ok(_) => (),
+							};
 						}
 					}
-					if message_valid && !self.subscribers.contains_key(&source_address) {
-						self.subscribers.insert(source_address.clone(),Subscription {
-							address:source_address.clone(),
-							name:String::new(),
-							classes:Vec::new(),
-							uptime:Local::now().timestamp_millis(),
-							unacked_packets:HashMap::new(),
-						});	
-						match self.send_packet(&vec![],&vec![0x02],&vec![],&source_address) {
-							Err(why) => return Err(why),
-							Ok(_) => (),
-						};
-					}
-					if parameter_bytes.len() > 0 {
-						match (parameter_bytes[0],payload_bytes.len()) {
+					if received_packet.parameter.len() > 0 {
+						match (received_packet.parameter[0],received_packet.payload.len()) {
 							(0x06,8) => {
 								let mut acked_hash:[u8;8] = [0;8];
-								acked_hash.copy_from_slice(&payload_bytes[..]);
+								acked_hash.copy_from_slice(&received_packet.payload[..]);
 								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
 									let _ = sub.unacked_packets.remove(&acked_hash);
 								}
 							},
 							(0x06,_) => (),
-							(0x02,0) => (),
+							(0x02,0) => match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+								&vec![0x06],&vec![],&source_address) {
+								Err(why) => return Err(why),
+								Ok(_) => (),
+							},
 							(0x18,0) => {
 								let _ = self.subscribers.remove(&source_address);
+								match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+									&vec![0x19],&vec![],&source_address) {
+									Err(why) => return Err(why),
+									Ok(_) => (),
+								};
 							},
 							(0x01,_) => {
 								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-									let new_name:String = String::from_utf8_lossy(&payload_bytes).to_string();
+									let new_name:String = String::from_utf8_lossy(&received_packet.payload).to_string();
 									let mut name_valid:bool = true;
 									for c in ['&','|',' ','!','^'].iter() {
 										if new_name.contains(*c) {
@@ -656,7 +906,7 @@ impl Server {
 							},
 							(0x11,_) => {
 								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-									let new_class:String = String::from_utf8_lossy(&payload_bytes).to_string();
+									let new_class:String = String::from_utf8_lossy(&received_packet.payload).to_string();
 									let mut class_valid:bool = true;
 									for c in ['&','|',' ','!','^'].iter() {
 										if new_class.contains(*c) {
@@ -674,7 +924,7 @@ impl Server {
 							},
 							(0x12,_) => {
 								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-									let deleted_class:String = String::from_utf8_lossy(&payload_bytes).to_string();
+									let deleted_class:String = String::from_utf8_lossy(&received_packet.payload).to_string();
 									for n in (0..sub.classes.len()).rev() {
 										if sub.classes[n] == deleted_class {
 											sub.classes.remove(n);
@@ -683,7 +933,7 @@ impl Server {
 								}
 							},
 							(0x13,0) => {
-								if let Some(mut sub) = self.subscribers.get(&source_address) {
+								if let Some(mut sub) = self.subscribers.clone().get(&source_address) {
 									for class in sub.classes.iter() {
 										match self.send_packet(&vec![],&vec![0x13],&class.as_bytes().to_vec(),&source_address) {
 											Err(why) => return Err(why),
@@ -692,13 +942,17 @@ impl Server {
 									}
 								}
 							}
-							(b'@',_) => {
-								match self.send_packet(&vec![],&vec![0x06],&hash_bytes(&bottle).to_vec(),&source_address) {
+							(b'>',_) => {
+								let mut packet_hash:[u8;8] = [0;8];
+								let mut sha3 = Keccak::new_sha3_256();
+								sha3.update(&input_buffer[..receive_length]);
+								sha3.finalize(&mut packet_hash);
+								match self.send_packet(&vec![],&vec![0x06],&packet_hash.to_vec(),&source_address) {
 									Err(why) => return Err(why),
 									Ok(_) => (),
 								};
-								let payload_string:String = String::from_utf8_lossy(&payload_bytes).to_string();
-								let parameter_string:String = String::from_utf8_lossy(&parameter_bytes).to_string();
+								let payload_string:String = String::from_utf8_lossy(&received_packet.payload).to_string();
+								let parameter_string:String = String::from_utf8_lossy(&received_packet.parameter[1..]).to_string();
 								let mut sender_name:String = "unknown".to_owned();
 								let mut sender_class:String = "unknown".to_owned();
 								if let Some(sub) = self.subscribers.get(&source_address) {
@@ -708,27 +962,18 @@ impl Server {
 									}
 								}
 								let mut message_status:&str = "OK";
-								if !message_valid {
-									message_status = "INVALID";
-								} else if timestamp > now+self.time_tolerance_ms {
+								if received_packet.timestamp > now+self.time_tolerance_ms {
 									message_status = "FUTURE";
-									message_valid = false;
-								} else if timestamp < now-self.time_tolerance_ms {
+								} else if received_packet.timestamp < now-self.time_tolerance_ms {
 									message_status = "OUTDATED";
-									message_valid = false;
+								} else if !received_packet.valid {
+									message_status = "INVALID";
 								}
-								self.log(&format!("[{}] @{}/#{} -> {}",&message_status,&sender_name,&sender_class,&payload_string));
-								self.receive_queue.push_back(Packet {
-									raw:bottle,
-									decrypted:decrypted_bytes,
-									valid:message_valid,
-									timestamp:timestamp,
-									source:source_address,
-									sender:sender_bytes,
-									parameter:parameter_bytes,
-									payload:payload_bytes,
-								});
+								self.log(&format!("[{}] @{}/#{} -> >[{}] {}",
+									&message_status,&sender_name,&sender_class,&parameter_string,&payload_string));
+								self.receive_queue.push_back(received_packet);
 							},
+							(_,_) => (),
 						}; // match message[0]
 					} // if message.len > 0
 				}, // recvfrom ok
@@ -740,28 +985,74 @@ impl Server {
 		return Ok(());
 	}
 
-	pub fn relay_packet(&self,packet:&Packet) -> Result<(),io::Error> {
+	pub fn resend_unacked(&mut self) -> Result<(),io::Error> {
+		let now:i64 = Local::now().timestamp_millis();
+		for sub in self.subscribers.clone().iter() {
+			// retransmit packets that haven't been acknowledged and were last sent a while ago.
+			if sub.1.unacked_packets.len() > self.max_unsent_packets {
+				if let Some(mut list_sub) = self.subscribers.get_mut(&sub.0) {
+					list_sub.unacked_packets.clear();
+				}
+				if !sub.1.classes.contains(&"server".to_owned()) {
+					self.subscribers.remove(&sub.0);
+					continue;
+				}
+			}
+			for unacked_packet in sub.1.unacked_packets.iter() {
+				let packet_hash:&[u8;8] = &unacked_packet.0;
+				let packet_contents:&Vec<u8> = &(unacked_packet.1).0;
+				let packet_timestamp:&i64 = &(unacked_packet.1).1;
+				// if the packet's timestamp is a while ago, resend it.
+				if *packet_timestamp < now-self.time_tolerance_ms {
+					match self.send_raw(&packet_contents,&sub.0) {
+						Err(why) => return Err(why),
+						Ok(_) => (),
+					};
+					// after resending a packet, update its timestamp in the original subscriber list.
+					if let Some(mut list_sub) = self.subscribers.get_mut(&sub.0) {
+						list_sub.unacked_packets.insert(packet_hash.clone(),(packet_contents.clone(),now.clone()));
+					}
+				}
+			}
+		}
+		return Ok(());
+	}
+
+	pub fn relay_packet(&mut self,packet:&Packet) -> Result<(),io::Error> {
 		if !packet.valid {
 			return Ok(());
 		}
+		let mut packet_hash:[u8;8] = [0;8];
+		let mut sha3 = Keccak::new_sha3_256();
+		sha3.update(&packet.raw);
+		sha3.finalize(&mut packet_hash);
 		let send:bool = packet.payload.len() > 0;
 		let mut number_matched:u64 = 0;
-		for sub in self.subscribers.iter() {
+		for sub in self.subscribers.clone().iter_mut() {
 			let mut subscriber_identifiers:String = String::new();
 			subscriber_identifiers.push_str(&format!("@{} ",&sub.1.name));
 			for class in sub.1.classes.iter() {
 				subscriber_identifiers.push_str(&format!("#{} ",&class));
 			}
-			if &packet.source != sub.0 
-				&& (wordmatch(&String::from_utf8_lossy(&packet.parameter).to_string(),&subscriber_identifiers) 
-				|| sub.1.classes.contains(&"supervisor".to_owned())) {
+			if &packet.source != sub.0 && packet.parameter.len() >= 1 && packet.parameter[0] == b'>'
+				&& !self.recent_packets.contains(&packet_hash)
+				&& (wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&subscriber_identifiers) 
+				|| sub.1.classes.contains(&"supervisor".to_owned())
+				|| sub.1.classes.contains(&"server".to_owned())) {
 				if send {
 					match self.send_raw(&packet.raw,&sub.0) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
-				}
+					self.recent_packets.push_back(packet_hash.clone());
+					if self.recent_packets.len() > self.max_recent_packets {
+						let _ = self.recent_packets.pop_front();
+					}
+				}	
 				number_matched += 1;
+				if let Some(mut listed_sub) = self.subscribers.get_mut(&sub.0) {
+					listed_sub.unacked_packets.insert(packet_hash.clone(),(packet.raw.clone(),packet.timestamp.clone()));
+				}
 			}
 			if send {
 				match self.send_packet(&vec![],&vec![0x06],&u64_to_bytes(&number_matched).to_vec(),&packet.source) {
