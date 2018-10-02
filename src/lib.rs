@@ -1,4 +1,4 @@
-// Teamech v 0.7.1 September 2018
+// Teamech v 0.7.1 October 2018
 
 /*
 Feature Outline
@@ -440,7 +440,7 @@ impl Client {
 	// the WouldBlock errors resulting from no new packets being available are suppressed,
 	// so they do not need to be handled in the implementation code.
 	pub fn get_packets(&mut self) -> Result<(),io::Error> {
-		let mut input_buffer:[u8;512] = [0;512];
+		let mut input_buffer:[u8;8192] = [0;8192];
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
@@ -477,10 +477,7 @@ impl Client {
 		return Ok(());
 	}
 
-	// encrypts and transmits a payload of bytes to the server. total payload length
-	// (including sender string, parameter string, and message contents) cannot be more
-	// than 500 bytes; attempting to provide arguments that would exceed this limit will
-	// result in an io::ErrorKind::InvalidData.
+	// encrypts and transmits a payload of bytes to the server.
 	pub fn send_packet(&mut self,parameter:&Vec<u8>,payload:&Vec<u8>) -> Result<(),io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		let mut primary_class:&str = "";
@@ -494,9 +491,6 @@ impl Client {
 		message.append(&mut parameter.clone());
 		message.append(&mut payload.clone());
 		let bottle:Vec<u8> = self.crypt.encrypt(&message);
-		if bottle.len() > 500 {
-			return Err(io::Error::new(io::ErrorKind::InvalidData,"payload too large"));
-		}
 		match self.send_raw(&bottle) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
@@ -748,7 +742,7 @@ impl Server {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		let mut input_buffer:[u8;512] = [0;512];
+		let mut input_buffer:[u8;8192] = [0;8192];
 		let wait_start:i64 = Local::now().timestamp_millis();
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
@@ -794,9 +788,6 @@ impl Server {
 		message.append(&mut parameter.clone());
 		message.append(&mut payload.clone());
 		let bottle:Vec<u8> = self.crypt.encrypt(&message);
-		if bottle.len() > 500 {
-			return Err(io::Error::new(io::ErrorKind::InvalidData,"payload too large"));
-		}
 		match self.socket.send_to(&bottle[..],&address) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
@@ -830,7 +821,7 @@ impl Server {
 	}
 
 	pub fn get_packets(&mut self) -> Result<(),io::Error> {
-		let mut input_buffer:[u8;512] = [0;512];
+		let mut input_buffer:[u8;8192] = [0;8192];
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
