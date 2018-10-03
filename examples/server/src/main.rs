@@ -1,4 +1,4 @@
-static VERSION:&str = "0.7.1 October 2018";
+static VERSION:&str = "0.7.3 October 2018";
 
 extern crate teamech;
 
@@ -6,7 +6,6 @@ extern crate teamech;
 extern crate clap;
 
 use std::process;
-use std::collections::VecDeque;
 
 fn main() {
 	// use Clap to obtain command-line arguments
