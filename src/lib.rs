@@ -91,6 +91,23 @@ fn bytes_to_u64(bytes:&[u8;8]) -> u64 {
 	return bytes.as_ref().read_u64::<LittleEndian>().expect("failed to convert bytes to u64");
 }
 
+fn bytes_to_hex(v:&Vec<u8>) -> String {
+	let mut result:String = String::from("");
+	for x in 0..v.len() {
+		if v[x] == 0x00 {
+			result.push_str(&format!("00"));
+		} else if v[x] < 0x10 {
+			result.push_str(&format!("0{:x?}",v[x]));
+		} else {
+			result.push_str(&format!("{:x?}",v[x]));
+		}
+		if x < v.len()-1 {
+			result.push_str(" ");
+		}
+	}
+	return result;
+}
+
 // accepts a boolean expression in the form `(foo|bar)&baz` and determines if it matches a 
 // string of words in the form `foo bar baz`
 // edge cases:
@@ -340,6 +357,147 @@ pub struct Event {
 	pub parameter:Vec<u8>,											// event parameter (e.g. routing expression)
 	pub contents:Vec<u8>,												// event contents (e.g. message payload)
 	pub timestamp:DateTime<Local>,							// timestamp of event
+}
+
+impl Event {
+
+	pub fn to_string(&self) -> String {
+		match self.class {
+			EventClass::Acknowledge => {
+				return format!("[{}] Acknowledgement of [{}] by {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),bytes_to_hex(&self.contents.to_vec()),
+					String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::Create => {
+				return format!("[{}] Server initialized.",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
+			},
+			EventClass::Subscribe => {
+				return format!("[{}] Subscription opened by {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::Unsubscribe => {
+				return format!("[{}] Subscription closed by {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::ServerLink => {
+				return format!("[{}] Linked to server at [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ServerLinkFailure => {
+				return format!("[{}] Could not link to server at [{}]: {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents),
+					String::from_utf8_lossy(&self.parameter));
+			},
+			EventClass::ServerUnlink => {
+				return format!("[{}] Unlinked from server at [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ReceiveMessage => {
+				return format!("[{}] {} [{}] -> >[{}] {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ReceiveFailure => {
+				return format!("[{}] Could not receive packet: {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::SendMessage => {
+				return format!("[{}] >[{}] {} -> {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::SendFailure => {
+				return format!("[{}] Could not send packet to {} [{}]: {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::DeadEndMessage => {
+				return format!("[{}] Not relayed (no matching recipients): >[{}] {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::HaltedMessage => {
+				return format!("[{}] Not relayed (returning packet): >[{}] {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::TestMessage => {
+				return format!("[{}] Match test: >[{}] [matches {}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::RoutedMessage => {
+				return format!("[{}] [{}] {} -> {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),bytes_to_hex(&self.parameter.to_vec()),
+					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::GlobalMessage => {
+				return format!("[{}] >[{}] {} -> [all clients]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),bytes_to_hex(&self.parameter.to_vec()),
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::InvalidMessage => {
+				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> >[{}] {}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::DeliveryRetry => {
+				return format!("[{}] [resending] >[{}] {} -> {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::DeliveryFailure => {
+				return format!("[{}] [delivery failed] >[{}] {} -> {} [{}]",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::NameUpdate => {
+				return format!("[{}] {} [{}] set name to @{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::NameUpdateFailure => {
+				return format!("[{}] {} [{}] could not set name to @{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ClassAdd => {
+				return format!("[{}] {} [{}] added class #{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ClassAddFailure => {
+				return format!("[{}] {} [{}] could not add class #{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ClassRemove => {
+				return format!("[{}] {} [{}] deleted class #{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ClassListRequest => {
+				return format!("[{}] {} [{}] requested class list.",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::ClassListResponse => {
+				return format!("[{}] class list for {} [{}]: #{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+			EventClass::ClientListRequest => {
+				return format!("[{}] {} [{}] requested client list.",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+			},
+			EventClass::ClientListResponse => {
+				return format!("[{}] client list for {} [{}]: #{}",
+					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+					String::from_utf8_lossy(&self.contents));
+			},
+		};
+	}
+
 }
 
 // Packet Structure: [sender.len][sender][parameter.len][parameter][payload][timestamp][signature][nonce]
@@ -1593,7 +1751,7 @@ impl Server {
 							class:EventClass::RoutedMessage,
 							identifier:packet.sender.clone(),
 							address:format!("{}",&packet.source),
-							parameter:packet.parameter.clone(),
+							parameter:packet_hash.to_vec(),
 							contents:packet.payload.clone(),
 							timestamp:Local::now(),
 						});
@@ -1658,7 +1816,7 @@ impl Server {
 				class:EventClass::GlobalMessage,
 				identifier:packet.sender.clone(),
 				address:format!("{}",&packet.source),
-				parameter:packet.parameter.clone(),
+				parameter:packet_hash.to_vec(),
 				contents:packet.payload.clone(),
 				timestamp:Local::now(),
 			});

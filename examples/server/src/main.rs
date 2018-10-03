@@ -32,8 +32,6 @@ fn main() {
 	let server_name:&str = arguments.value_of("name").unwrap_or("server");
 	// recovery loop handles basic stateful setup of server initially, and catches breaks from the processor loop.
 	'recovery:loop {
-		// set up a queue of log lines to be printed to the console.
-		let mut log_lines:VecDeque<String> = VecDeque::new();
 		// initialize a new server object with the arguments collected from the command line.
 		let mut server = match teamech::new_server(&server_name,&pad_path,port_number) {
 			Err(why) => {
@@ -66,139 +64,7 @@ fn main() {
 				Ok(_) => (),
 			};
 			while let Some(event) = server.event_log.pop_front() {
-				match event.class {
-					teamech::EventClass::Acknowledge => (),
-					teamech::EventClass::Create => {
-						log_lines.push_back(format!("[{}] Server initialized.",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")));
-					},
-					teamech::EventClass::Subscribe => {
-						log_lines.push_back(format!("[{}] Subscription opened by {} [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::Unsubscribe => {
-						log_lines.push_back(format!("[{}] Subscription closed by {} [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::ServerLink => {
-						log_lines.push_back(format!("[{}] Linked to server at [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ServerLinkFailure => {
-						log_lines.push_back(format!("[{}] Could not link to server at [{}]: {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.contents),
-							String::from_utf8_lossy(&event.parameter)));
-					},
-					teamech::EventClass::ServerUnlink => {
-						log_lines.push_back(format!("[{}] Unlinked from server at [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ReceiveMessage => {
-						log_lines.push_back(format!("[{}] {} [{}] -> >[{}] {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.parameter),String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ReceiveFailure => {
-						log_lines.push_back(format!("[{}] Could not receive packet: {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::SendMessage => {
-						log_lines.push_back(format!("[{}] >[{}] {} -> {} [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::SendFailure => {
-						log_lines.push_back(format!("[{}] Could not send packet to {} [{}]: {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::DeadEndMessage => {
-						log_lines.push_back(format!("[{}] Not relayed (no matching recipients): >[{}] {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::HaltedMessage => {
-						log_lines.push_back(format!("[{}] Not relayed (returning packet): >[{}] {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::TestMessage => {
-						log_lines.push_back(format!("[{}] Match test: >[{}] [matches {}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::RoutedMessage => {
-						log_lines.push_back(format!("[{}] >[{}] {} -> {} [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::GlobalMessage => {
-						log_lines.push_back(format!("[{}] >[{}] {} -> [all clients]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::InvalidMessage => {
-						log_lines.push_back(format!("[{}] [SIGNATURE INVALID] {} [{}] -> >[{}] {}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.parameter),String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::DeliveryRetry => {
-						log_lines.push_back(format!("[{}] [resending] >[{}] {} -> {} [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::DeliveryFailure => {
-						log_lines.push_back(format!("[{}] [delivery failed] >[{}] {} -> {} [{}]",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.parameter),
-							String::from_utf8_lossy(&event.contents),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::NameUpdate => {
-						log_lines.push_back(format!("[{}] {} [{}] set name to @{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::NameUpdateFailure => {
-						log_lines.push_back(format!("[{}] {} [{}] could not set name to @{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ClassAdd => {
-						log_lines.push_back(format!("[{}] {} [{}] added class #{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ClassAddFailure => {
-						log_lines.push_back(format!("[{}] {} [{}] could not add class #{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ClassRemove => {
-						log_lines.push_back(format!("[{}] {} [{}] deleted class #{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ClassListRequest => {
-						log_lines.push_back(format!("[{}] {} [{}] requested class list.",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::ClassListResponse => {
-						log_lines.push_back(format!("[{}] class list for {} [{}]: #{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-					teamech::EventClass::ClientListRequest => {
-						log_lines.push_back(format!("[{}] {} [{}] requested client list.",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address));
-					},
-					teamech::EventClass::ClientListResponse => {
-						log_lines.push_back(format!("[{}] client list for {} [{}]: #{}",
-							event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&event.identifier),event.address,
-							String::from_utf8_lossy(&event.contents)));
-					},
-				};
-			}
-			while let Some(line) = log_lines.pop_front() {
-				println!("{}",line);
+				println!("{}",event.to_string());
 			}
 		}
 	}
