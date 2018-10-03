@@ -536,19 +536,60 @@ impl Client {
 						let mut sha3 = Keccak::new_sha3_256();
 						sha3.update(&input_buffer[..receive_length]);
 						sha3.finalize(&mut packet_hash);
-						if received_packet.valid {
-							match self.send_packet(&vec![0x06],&packet_hash.to_vec()) {
-								Err(why) => return Err(why),
-								Ok(_) => (),
+						if received_packet.valid && received_packet.parameter.len() > 0 {
+							match (received_packet.parameter[0],received_packet.payload.len()) {
+								(0x06,8) => {
+									let mut acked_hash:[u8;8] = [0;8];
+									acked_hash.copy_from_slice(&received_packet.payload[..]);
+									let _ = self.unacked_packets.remove(&acked_hash);
+									self.event_log.push_back(Event {
+										class:EventClass::Acknowledge,
+										identifier:received_packet.sender.clone(),
+										address:format!("{}",&source_address),
+										parameter:vec![],
+										contents:acked_hash.to_vec(),
+										timestamp:Local::now(),
+									});
+								},
+								(0x06,0) => {
+									self.event_log.push_back(Event {
+										class:EventClass::Acknowledge,
+										identifier:received_packet.sender.clone(),
+										address:format!("{}",&source_address),
+										parameter:vec![],
+										contents:vec![],
+										timestamp:Local::now(),
+									});
+								}
+								(b'>',_) => {
+									match self.send_packet(&vec![0x06],&packet_hash.to_vec()) {
+										Err(why) => return Err(why),
+										Ok(_) => (),
+									};
+									self.event_log.push_back(Event {
+										class:EventClass::ReceiveMessage,
+										identifier:received_packet.sender.clone(),
+										address:format!("{}",&received_packet.source),
+										parameter:received_packet.parameter.clone(),
+										contents:received_packet.payload.clone(),
+										timestamp:Local::now(),
+									});
+								},
+								(_,_) => {
+									match self.send_packet(&vec![0x15],&packet_hash.to_vec()) {
+										Err(why) => return Err(why),
+										Ok(_) => (),
+									};
+									self.event_log.push_back(Event {
+										class:EventClass::InvalidMessage,
+										identifier:received_packet.sender.clone(),
+										address:format!("{}",&received_packet.source),
+										parameter:received_packet.parameter.clone(),
+										contents:received_packet.payload.clone(),
+										timestamp:Local::now(),
+									});
+								},
 							};
-							self.event_log.push_back(Event {
-								class:EventClass::ReceiveMessage,
-								identifier:received_packet.sender.clone(),
-								address:format!("{}",&received_packet.source),
-								parameter:received_packet.parameter.clone(),
-								contents:received_packet.payload.clone(),
-								timestamp:Local::now(),
-							});
 						} else {
 							match self.send_packet(&vec![0x15],&packet_hash.to_vec()) {
 								Err(why) => return Err(why),
