@@ -361,139 +361,115 @@ pub struct Event {
 
 impl Event {
 
+	// formats the event as a human-readable string that can be printed to the console and/or written to log files.
 	pub fn to_string(&self) -> String {
+		let timestamp:String = format!("{} {}",self.timestamp.timestamp_millis(),self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
 		match self.class {
 			EventClass::Acknowledge => {
 				return format!("[{}] Acknowledgement of [{}] by {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),bytes_to_hex(&self.contents.to_vec()),
-					String::from_utf8_lossy(&self.identifier),self.address);
+					timestamp,bytes_to_hex(&self.contents.to_vec()),String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::Create => {
-				return format!("[{}] Server initialized.",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
+				return format!("[{}] Server initialized.",timestamp);
 			},
 			EventClass::Subscribe => {
-				return format!("[{}] Subscription opened by {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] Subscription opened by {} [{}]",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::Unsubscribe => {
-				return format!("[{}] Subscription closed by {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] Subscription closed by {} [{}]",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::ServerLink => {
-				return format!("[{}] Linked to server at [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Linked to server at [{}]",timestamp,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ServerLinkFailure => {
-				return format!("[{}] Could not link to server at [{}]: {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents),
+				return format!("[{}] Could not link to server at [{}]: {}",timestamp,String::from_utf8_lossy(&self.contents),
 					String::from_utf8_lossy(&self.parameter));
 			},
 			EventClass::ServerUnlink => {
-				return format!("[{}] Unlinked from server at [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Unlinked from server at [{}]",timestamp,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ReceiveMessage => {
-				return format!("[{}] {} [{}] -> >[{}] {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+				return format!("[{}] {} [{}] -> >[{}] {}",timestamp,String::from_utf8_lossy(&self.identifier),self.address,
 					String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ReceiveFailure => {
-				return format!("[{}] Could not receive packet: {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Could not receive packet: {}",timestamp,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::SendMessage => {
-				return format!("[{}] >[{}] {} -> {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+				return format!("[{}] >[{}] {} -> {} [{}]",timestamp,String::from_utf8_lossy(&self.parameter),
 					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::SendFailure => {
-				return format!("[{}] Could not send packet to {} [{}]: {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Could not send packet to {} [{}]: {}",timestamp,String::from_utf8_lossy(&self.identifier),
+					self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::DeadEndMessage => {
-				return format!("[{}] Not relayed (no matching recipients): >[{}] {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+				return format!("[{}] Not relayed (no matching recipients): >[{}] {}",timestamp,String::from_utf8_lossy(&self.parameter),
 					String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::HaltedMessage => {
-				return format!("[{}] Not relayed (returning packet): >[{}] {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+				return format!("[{}] Not relayed (returning packet): >[{}] {}",timestamp,String::from_utf8_lossy(&self.parameter),
 					String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::TestMessage => {
-				return format!("[{}] Match test: >[{}] [matches {}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
+				return format!("[{}] Match test: >[{}] [matches {}]",timestamp,String::from_utf8_lossy(&self.parameter),
 					String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::RoutedMessage => {
-				return format!("[{}] [{}] {} -> {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),bytes_to_hex(&self.parameter.to_vec()),
+				return format!("[{}] [{}] {} -> {} [{}]",timestamp,bytes_to_hex(&self.parameter.to_vec()),
 					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::GlobalMessage => {
-				return format!("[{}] >[{}] {} -> [all clients]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),bytes_to_hex(&self.parameter.to_vec()),
+				return format!("[{}] >[{}] {} -> [all clients]",timestamp,bytes_to_hex(&self.parameter.to_vec()),
 					String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::InvalidMessage => {
-				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> >[{}] {}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
+				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> >[{}] {}",timestamp,String::from_utf8_lossy(&self.identifier),self.address,
 					String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::DeliveryRetry => {
 				return format!("[{}] [resending] >[{}] {} -> {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
-					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+					timestamp,String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents),
+					String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::DeliveryFailure => {
 				return format!("[{}] [delivery failed] >[{}] {} -> {} [{}]",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.parameter),
-					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+					timestamp,String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents),
+					String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::NameUpdate => {
 				return format!("[{}] {} [{}] set name to @{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::NameUpdateFailure => {
 				return format!("[{}] {} [{}] could not set name to @{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ClassAdd => {
 				return format!("[{}] {} [{}] added class #{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ClassAddFailure => {
 				return format!("[{}] {} [{}] could not add class #{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ClassRemove => {
 				return format!("[{}] {} [{}] deleted class #{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ClassListRequest => {
-				return format!("[{}] {} [{}] requested class list.",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] {} [{}] requested class list.",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::ClassListResponse => {
 				return format!("[{}] class list for {} [{}]: #{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 			EventClass::ClientListRequest => {
-				return format!("[{}] {} [{}] requested client list.",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] {} [{}] requested client list.",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
 			},
 			EventClass::ClientListResponse => {
 				return format!("[{}] client list for {} [{}]: #{}",
-					self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.contents));
+					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
 			},
 		};
 	}
