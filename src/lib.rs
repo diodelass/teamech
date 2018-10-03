@@ -1,18 +1,17 @@
-// Teamech v 0.7.3 October 2018
+// Teamech v 0.7.4 October 2018
 
 /*
 Feature Outline
 
 Functionality														Implemented
 
-I. Server																		[ ]
-	A. Subscriptions													[ ]
+I. Server																		
+	A. Subscriptions													[X]
 		1. Acceptance														[X]
 		2. Cancellation													[X]
 			a. Upon request												[X]
 			b. Upon absence												[X]
-			c. Upon misbehavior										[ ]
-		3. Banning															[ ]
+		3. Banning															[X]
 		4. Identifiers													[X]
 			a. Names (unique)											[X]
 				i. Setting													[X]
@@ -29,12 +28,12 @@ I. Server																		[ ]
 			a. Resending													[X]
 	C. Server-Server Links										[X]
 		1. Opening															[X] 
-		2. Closing															[ ]
-II. Client																	[ ]
-	A. Subscribing														[ ]
+		2. Closing															[X]
+II. Client																	
+	A. Subscribing														[X]
 		1. Opening subscription									[X]
 		2. Closing subscription									[X]
-		3. Responding to closure								[ ]
+		3. Responding to closure								[X]
 	B. Sending																[X]
 	C. Receiving															[X]
 III. Security																[X]
@@ -62,10 +61,10 @@ use byteorder::{LittleEndian,ReadBytesExt,WriteBytesExt};
 use std::io::prelude::*;
 use std::io;
 use std::fs::File;
-use std::collections::{VecDeque,HashMap};
+use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
 use std::thread::sleep;
-use std::net::{UdpSocket,SocketAddr};
+use std::net::{UdpSocket,SocketAddr,IpAddr};
 
 // converts a signed 64-bit int into eight bytes
 fn i64_to_bytes(number:&i64) -> [u8;8] {
@@ -373,7 +372,8 @@ impl Event {
 				return format!("[{}] Server initialized.",timestamp);
 			},
 			EventClass::Subscribe => {
-				return format!("[{}] Subscription opened by {} [{}]",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] Subscription requested by {} [{}] - {}",timestamp,String::from_utf8_lossy(&self.identifier),
+				self.address,String::from_utf8_lossy(&self.parameter));
 			},
 			EventClass::Unsubscribe => {
 				return format!("[{}] Subscription closed by {} [{}]",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
@@ -519,7 +519,8 @@ pub struct Client {
 	pub classes:Vec<String>,																// our self-declared classes
 	pub crypt:Crypt,																				// crypt object holding key data
 	pub receive_queue:VecDeque<Packet>,											// incoming packets that need to be processed by the implementation
-	pub event_log:VecDeque<Event>,
+	pub subscribed:bool,																		// are we subscribed?
+	pub event_log:VecDeque<Event>,													// log of events produced by the client
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
 	pub max_resend_tries:u64,																// maximum number of tries to resend a packet before discarding it
 	pub uptime:i64,																					// time at which this client was created
@@ -544,6 +545,7 @@ pub fn new_client(pad_path:&str,server_address:SocketAddr,local_port:u16) -> Res
 				classes:Vec::new(),
 				receive_queue:VecDeque::new(),
 				event_log:VecDeque::new(),
+				subscribed:false,
 				unacked_packets:HashMap::new(),
 				max_resend_tries:10,
 				crypt:new_crypt,
@@ -694,6 +696,30 @@ impl Client {
 										contents:vec![],
 										timestamp:Local::now(),
 									});
+								}
+								(0x19,0) => {
+									self.event_log.push_back(Event {
+										class:EventClass::Unsubscribe,
+										identifier:b"server".to_vec(),
+										address:String::new(),
+										parameter:vec![],
+										contents:vec![],
+										timestamp:Local::now(),
+									});
+									if self.subscribed { 
+										match self.send_packet(&vec![0x02],&packet_hash.to_vec()) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+										self.event_log.push_back(Event {
+											class:EventClass::Subscribe,
+											identifier:b"local".to_vec(),
+											address:String::new(),
+											parameter:vec![],
+											contents:vec![],
+											timestamp:Local::now(),
+										});
+									}
 								}
 								(b'>',_) => {
 									match self.send_packet(&vec![0x06],&packet_hash.to_vec()) {
@@ -874,6 +900,7 @@ impl Client {
 			contents:vec![],
 			timestamp:Local::now(),
 		});
+		self.subscribed = true;
 		return Ok(());
 	}
 
@@ -892,6 +919,7 @@ impl Client {
 			contents:vec![],
 			timestamp:Local::now(),
 		});
+		self.subscribed = false;
 		return Ok(());
 	}
 
@@ -977,6 +1005,9 @@ pub struct Server {
 	pub socket:UdpSocket,
 	pub subscribers:HashMap<SocketAddr,Subscription>,
 	pub max_subscribers:usize,
+	pub ban_points:HashMap<IpAddr,u64>,
+	pub max_ban_points:u64,
+	pub banned_addresses:HashSet<IpAddr>,
 	pub recent_packets:VecDeque<[u8;8]>,
 	pub max_recent_packets:usize,
 	pub max_unsent_packets:usize,
@@ -1004,6 +1035,9 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 				socket:socket,
 				subscribers:HashMap::new(),
 				max_subscribers:1024,
+				ban_points:HashMap::new(),
+				max_ban_points:10,
+				banned_addresses:HashSet::new(),
 				recent_packets:VecDeque::new(),
 				event_log:VecDeque::new(),
 				max_recent_packets:64,
@@ -1327,6 +1361,7 @@ impl Server {
 	}
 
 	pub fn get_packets(&mut self) -> Result<(),io::Error> {
+		let server_name:String = self.name.clone();
 		let mut input_buffer:[u8;8192] = [0;8192];
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
@@ -1346,7 +1381,21 @@ impl Server {
 					},
 				},
 				Ok((receive_length,source_address)) => {
-					let server_name:String = self.name.clone();
+					// check bans immediately after receiving a packet, to minimize the impact of flooding
+					if self.banned_addresses.contains(&source_address.ip()) {
+						continue;
+					}
+					let mut current_ban_points:u64 = 0;
+					if let Some(points) = self.ban_points.get(&source_address.ip()) {
+						current_ban_points = points.clone()
+					}
+					if !self.ban_points.contains_key(&source_address.ip()) {
+						self.ban_points.insert(source_address.ip(),0);
+					}
+					if current_ban_points > self.max_ban_points { 
+						self.banned_addresses.insert(source_address.ip());
+						continue;
+					}
 					let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
 					if !self.subscribers.contains_key(&source_address) {
 						if received_packet.valid && self.subscribers.len() < self.max_subscribers {
@@ -1377,11 +1426,20 @@ impl Server {
 								Err(why) => return Err(why),
 								Ok(_) => (),
 							};
+							let mut reject_reason:&str = "unspecified reason";
+							if !received_packet.valid {
+								reject_reason = "signature invalid";
+								if let Some(points) = self.ban_points.get_mut(&source_address.ip()) {
+									*points += 1;
+								}
+							} else if self.subscribers.len() >= self.max_subscribers {
+								reject_reason = "server full";
+							}
 							self.event_log.push_back(Event {
 								class:EventClass::Subscribe,
 								identifier:received_packet.sender.clone(),
 								address:format!("{}",&source_address),
-								parameter:b"rejected".to_vec(),
+								parameter:format!("rejected ({})",&reject_reason).as_bytes().to_vec(),
 								contents:vec![],
 								timestamp:Local::now(),
 							});
@@ -1615,6 +1673,7 @@ impl Server {
 	}
 
 	pub fn resend_unacked(&mut self) -> Result<(),io::Error> {
+		let server_name:String = self.name.clone();
 		let now:i64 = Local::now().timestamp_millis();
 		for sub in self.subscribers.clone().iter() {
 			// retransmit packets that haven't been acknowledged and were last sent a while ago.
@@ -1624,12 +1683,22 @@ impl Server {
 				}
 				if !sub.1.classes.contains(&"server".to_owned()) {
 					self.subscribers.remove(&sub.0);
+					match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+						&vec![0x19],&vec![],&sub.0) {
+						Err(why) => return Err(why),
+						Ok(_) => (),
+					};
 					continue;
 				}
 			}
 			if sub.1.delivery_failures > self.max_resend_failures {
 				if !sub.1.classes.contains(&"server".to_owned()) {
 					self.subscribers.remove(&sub.0);
+					match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+						&vec![0x19],&vec![],&sub.0) {
+						Err(why) => return Err(why),
+						Ok(_) => (),
+					};
 					continue;
 				}
 			}
