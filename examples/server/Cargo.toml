@@ -1,0 +1,8 @@
+[package]
+name = "teamech-server"
+version = "0.7.1"
+authors = ["Ellie D. <sporillium@gmail.com>"]
+
+[dependencies]
+teamech = { path = "../.." }
+clap = "2"
