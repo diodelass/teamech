@@ -1,13 +1,4 @@
-/* Teamech Desktop Client v0.7.4
- * October 2018
- * License: AGPL v3.0
-
-pancurses = "0.16"
-dirs = "1.0.3"
-
- */
-
-static VERSION:&str = "0.8.0 October 2018";
+static VERSION:&str = "0.8.1 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/desktop";
 static PROMPT:&str = "[teamech]~ ";
 static BAR:char = '-';
@@ -490,7 +481,7 @@ fn main() {
 				},
 				Ok(_) => (),
 			};
-			window_logger.log(&format!("Successfully subscribed to server at {}",&client.server_address));
+			window_logger.log(&format!("Successfully contacted server at {}",&client.server_address));
 			break;
 		} // 'authtry
 		'operator:loop {
@@ -517,7 +508,7 @@ fn main() {
 						}
 					},
 					teamech::EventClass::ClientSubscribe => {
-						window_logger.log("Re-subscribed to server.");
+						window_logger.log("Subscribed to server.");
 						match client.set_name(&client_name) {
 							Err(why) => {
 								window_logger.log(&format!("Failed to set client name - {}.",why));

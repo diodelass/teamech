@@ -1,4 +1,5 @@
-// Teamech v 0.8.0 October 2018
+// Teamech v 0.8.1 October 2018
+// License: AGPL v3
 
 /*
 Feature Outline
@@ -351,6 +352,7 @@ pub enum EventClass {
 	ClassAdd,									// client added itself to a class
 	ClassAddFailure,					// client tried to add an invalid class
 	ClassRemove,							// client removed itself from a class
+	ClassRemoveFailure,				// failed to remove client from class
 	ClassListRequest,					// client requested its class list
 	ClassListResponse,				// server responded to class list request
 	ClientListRequest,				// client requested the list of all connected clients
@@ -917,100 +919,84 @@ impl Client {
 		return Ok(());
 	}
 
-	// transmits a subscription request packet. server will return 0x06 if
-	// we are already subscribed, 0x02 if we were not subscribed but are now,
-	// 0x15 if something's wrong (e.g. server full) or an unreadable packet
-	// if we have the wrong pad file.
-	pub fn subscribe(&mut self) -> Result<(),io::Error> {
-		let mut original_timeout:Option<Duration> = None;
-		if let Ok(timeout) = self.socket.read_timeout() {
-			original_timeout = timeout;
-		}
+	pub fn get_response(&mut self,target_parameters:&Vec<u8>) -> Result<(),io::Error> {
+		let mut input_buffer:[u8;8192] = [0;8192];
+		let wait_start:i64 = Local::now().timestamp_millis();
+		let original_timeout:Option<Duration>;
+		original_timeout = match self.socket.read_timeout() {
+			Err(why) => return Err(why),
+			Ok(t) => t,
+		};
 		match self.socket.set_read_timeout(Some(
 			Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
-			Err(why) => {
-				self.event_log.push_back(Event {
-					class:EventClass::ClientSubscribeFailure,
-					identifier:String::from("local"),
-					address:String::new(),
-					parameter:String::from("failed to transmit packet"),
-					contents:String::new(),
-					timestamp:Local::now(),
-				});
-				return Err(why);
-			},
-			Ok(_) => (),
-		};
-		match self.send_packet(&vec![0x02],&vec![]) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		let mut input_buffer:[u8;8192] = [0;8192];
-		let wait_start:i64 = Local::now().timestamp_millis();
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
 					io::ErrorKind::WouldBlock => {
-						self.event_log.push_back(Event {
-							class:EventClass::ClientSubscribeFailure,
-							identifier:String::from("local"),
-							address:String::new(),
-							parameter:String::from("no response"),
-							contents:format!("{}",&self.server_address),
-							timestamp:Local::now(),
-						});
-						return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
+						return Err(io::Error::new(io::ErrorKind::NotFound,"no response"));
 					},
 					_ => {
-						self.event_log.push_back(Event {
-							class:EventClass::ClientSubscribeFailure,
-							identifier:String::from("local"),
-							address:String::new(),
-							parameter:String::from("receiving response failed"),
-							contents:format!("{}",&self.server_address),
-							timestamp:Local::now(),
-						});
 						return Err(why);
 					},
 				},
 				Ok((receive_length,source_address)) => {
 					let received_packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
 					if received_packet.parameter.len() > 0 && source_address == self.server_address {
-						match received_packet.parameter[0] {
-							0x06 => break,
-							0x02 => break,
-							0x15 => {
-								self.event_log.push_back(Event {
-									class:EventClass::ClientSubscribeFailure,
-									identifier:String::from("local"),
-									address:String::new(),
-									parameter:String::from("connection refused"),
-									contents:format!("{}",&self.server_address),
-									timestamp:Local::now(),
-								});
-								return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"connection refused by server"));
-							},
-							_ => continue,
+						if target_parameters.contains(&received_packet.parameter[0]) {
+							break;
+						} else if received_packet.parameter[0] == 0x15 {
+							return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"operation refused"));
+						} else {
+							continue;
 						}
 					}
 				},
 			};
 			if Local::now().timestamp_millis() > wait_start+self.time_tolerance_ms {
-				self.event_log.push_back(Event {
-					class:EventClass::ClientSubscribeFailure,
-					identifier:String::from("local"),
-					address:String::new(),
-					parameter:String::from("no response"),
-					contents:format!("{}",&self.server_address),
-					timestamp:Local::now(),
-				});
-				return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
+				return Err(io::Error::new(io::ErrorKind::NotFound,"no response"));
 			}
 		}
 		match self.socket.set_read_timeout(original_timeout) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
+		return Ok(());
+	}
+
+	// transmits a subscription request packet. server will return 0x06 if
+	// we are already subscribed, 0x02 if we were not subscribed but are now,
+	// 0x15 if something's wrong (e.g. server full) or an unreadable packet
+	// if we have the wrong pad file.
+	pub fn subscribe(&mut self) -> Result<(),io::Error> {
+		match self.send_packet(&vec![0x02],&vec![]) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x02,0x06]) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClientSubscribeFailure,
+					identifier:String::from("client"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",why),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			}
+			Ok(_) => (),
+		};
+		self.event_log.push_back(Event {
+			class:EventClass::ClientSubscribe,
+			identifier:String::from("client"),
+			address:String::from("local"),
+			parameter:String::new(),
+			contents:String::new(),
+			timestamp:Local::now(),
+		});
 		self.subscribed = true;
 		return Ok(());
 	}
@@ -1022,10 +1008,24 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
+		match self.get_response(&vec![0x19]) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClientUnsubscribeFailure,
+					identifier:String::from("client"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",why),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			}
+			Ok(_) => (),
+		};
 		self.event_log.push_back(Event {
 			class:EventClass::ClientUnsubscribe,
-			identifier:String::from("local"),
-			address:String::new(),
+			identifier:String::from("client"),
+			address:String::from("local"),
 			parameter:String::new(),
 			contents:String::new(),
 			timestamp:Local::now(),
@@ -1039,6 +1039,20 @@ impl Client {
 	pub fn set_name(&mut self,name:&str) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x01],&name.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x06]) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::NameUpdateFailure,
+					identifier:String::from("client"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",why),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			}
 			Ok(_) => (),
 		};
 		self.name = name.to_owned();
@@ -1060,6 +1074,20 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
+		match self.get_response(&vec![0x06]) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClassAddFailure,
+					identifier:String::from("client"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",why),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			}
+			Ok(_) => (),
+		};
 		self.classes.push(class.to_owned());
 		self.event_log.push_back(Event {
 			class:EventClass::ClassAdd,
@@ -1077,6 +1105,20 @@ impl Client {
 	pub fn remove_class(&mut self,class:&str) -> Result<(),io::Error> {
 		match self.send_packet(&vec![0x12],&class.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x06]) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClassRemoveFailure,
+					identifier:String::from("client"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",why),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			}
 			Ok(_) => (),
 		};
 		for n in (0..self.classes.len()).rev() {
@@ -1253,108 +1295,138 @@ impl Server {
 		}
 	}
 
-	pub fn link_server(&mut self,remote_address:&SocketAddr) -> Result<(),io::Error> {
-		let server_name:String = self.name.clone();
-		let mut original_timeout:Option<Duration> = None;
-		if let Ok(timeout) = self.socket.read_timeout() {
-			original_timeout = timeout;
-		}
-		let send_fail = Event {
-			class:EventClass::ServerLinkFailure,
-			identifier:String::from("local"),
-			address:String::new(),
-			parameter:String::from("transmitting packet failed"),
-			contents:format!("{}",&remote_address),
-			timestamp:Local::now(),
+	pub fn get_response(&mut self,target_parameters:&Vec<u8>,target_address:&SocketAddr) -> Result<(),io::Error> {
+		let mut input_buffer:[u8;8192] = [0;8192];
+		let wait_start:i64 = Local::now().timestamp_millis();
+		let original_timeout:Option<Duration>;
+		original_timeout = match self.socket.read_timeout() {
+			Err(why) => return Err(why),
+			Ok(t) => t,
 		};
 		match self.socket.set_read_timeout(Some(
 			Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
-			Err(why) => {
-				self.event_log.push_back(send_fail);
-				return Err(why);
-			},
+			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x02],&vec![],&remote_address) {
-			Err(why) => {
-				self.event_log.push_back(send_fail);
-				return Err(why);
-			},
-			Ok(_) => (),
-		};
-		let mut input_buffer:[u8;8192] = [0;8192];
-		let wait_start:i64 = Local::now().timestamp_millis();
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
 					io::ErrorKind::WouldBlock => {
-						self.event_log.push_back(Event {
-							class:EventClass::ServerLinkFailure,
-							identifier:String::from("local"),
-							address:String::new(),
-							parameter:String::from("no response"),
-							contents:format!("{}",&remote_address),
-							timestamp:Local::now(),
-						});
-						return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
+						return Err(io::Error::new(io::ErrorKind::NotFound,"no response"));
 					},
 					_ => {
-						self.event_log.push_back(Event {
-							class:EventClass::ServerLinkFailure,
-							identifier:String::from("local"),
-							address:String::new(),
-							parameter:String::from("receiving response failed"),
-							contents:format!("{}",&remote_address),
-							timestamp:Local::now(),
-						});
 						return Err(why);
 					},
 				},
 				Ok((receive_length,source_address)) => {
 					let received_packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
-					if received_packet.parameter.len() > 0 && &source_address == remote_address {
-						match received_packet.parameter[0] {
-							0x06 => break,
-							0x02 => break,
-							0x15 => {
-								self.event_log.push_back(Event {
-									class:EventClass::ServerLinkFailure,
-									identifier:String::from("local"),
-									address:String::new(),
-									parameter:String::from("connection refused"),
-									contents:format!("{}",&remote_address),
-									timestamp:Local::now(),
-								});
-								return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"connection refused by server"));
-							},
-							_ => continue,
+					if received_packet.parameter.len() > 0 && &source_address == target_address {
+						if target_parameters.contains(&received_packet.parameter[0]) {
+							break;
+						} else if received_packet.parameter[0] == 0x15 {
+							return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"operation refused"));
+						} else {
+							continue;
 						}
 					}
 				},
 			};
 			if Local::now().timestamp_millis() > wait_start+self.time_tolerance_ms {
+				return Err(io::Error::new(io::ErrorKind::NotFound,"no response"));
+			}
+		}
+		match self.socket.set_read_timeout(original_timeout) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		return Ok(());
+	}
+
+	pub fn link_server(&mut self,remote_address:&SocketAddr) -> Result<(),io::Error> {
+		let server_name:String = self.name.clone();
+		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x02],
+			&vec![],&remote_address) {
+			Err(why) => {
 				self.event_log.push_back(Event {
 					class:EventClass::ServerLinkFailure,
-					identifier:String::from("local"),
-					address:String::new(),
-					parameter:String::from("no response"),
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:String::new(),
 					contents:format!("{}",&remote_address),
 					timestamp:Local::now(),
 				});
-				return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
-			}
-		}
-		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x12],&b"server".to_vec(),
-			&remote_address) {
-			Err(why) => {
-				self.event_log.push_back(send_fail);
 				return Err(why);
 			},
 			Ok(_) => (),
 		};
-		match self.socket.set_read_timeout(original_timeout) {
+		match self.get_response(&vec![0x02,0x06],&remote_address) {
 			Err(why) => {
-				self.event_log.push_back(send_fail);
+				self.event_log.push_back(Event {
+					class:EventClass::ClassAddFailure,
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",&remote_address),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			},
+			Ok(_) => (),
+		};
+		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x12],
+			&b"server".to_vec(),&remote_address) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClassAddFailure,
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",&remote_address),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			},
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x06],&remote_address) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClassAddFailure,
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",&remote_address),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			},
+			Ok(_) => (),
+		};
+		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x01],
+			&server_name.as_bytes().to_vec(),&remote_address) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::NameUpdateFailure,
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",&remote_address),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			},
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x06],&remote_address) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::NameUpdateFailure,
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:String::new(),
+					contents:format!("{}",&remote_address),
+					timestamp:Local::now(),
+				});
 				return Err(why);
 			},
 			Ok(_) => (),
@@ -1369,8 +1441,8 @@ impl Server {
 		});	
 		self.event_log.push_back(Event {
 			class:EventClass::ServerLink,
-			identifier:String::from("local"),
-			address:String::new(),
+			identifier:String::from("server"),
+			address:String::from("local"),
 			parameter:String::new(),
 			contents:format!("{}",&remote_address),
 			timestamp:Local::now(),

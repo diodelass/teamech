@@ -1,6 +1,6 @@
 [package]
 name = "teamech-console"
-version = "0.8.0"
+version = "0.8.1"
 authors = ["Ellie D. <sporillium@gmail.com>"]
 
 [dependencies]

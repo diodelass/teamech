@@ -1,4 +1,4 @@
-static VERSION:&str = "0.8.0";
+static VERSION:&str = "0.8.1 October 2018";
 
 extern crate teamech;
 
