@@ -1,4 +1,4 @@
-// Teamech v 0.7.4 October 2018
+// Teamech v 0.8.0 October 2018
 
 /*
 Feature Outline
@@ -65,6 +65,7 @@ use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
 use std::thread::sleep;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
+use std::str::FromStr;
 
 // converts a signed 64-bit int into eight bytes
 fn i64_to_bytes(number:&i64) -> [u8;8] {
@@ -319,42 +320,49 @@ impl Crypt {
 } // impl Crypt
 
 pub enum EventClass {
-	Acknowledge,						// ack
-	Create,									// client/server object created
-	Subscribe,							// client/server subscription
-	Unsubscribe,						// client/server cancellation
-	ServerLink,							// current server initiated a link to another
-	ServerLinkFailure,			// attempt to link to another server failed
-	ServerUnlink,						// current server closed a link to another
-	ReceiveMessage,					// message delivered to the current endpoint (e.g. client)
-	ReceiveFailure,					// could not receive data
-	SendMessage,						// message sent by the current endpoint
-	SendFailure,						// could not send data
-	DeadEndMessage,					// message that does not match any subscribed clients
-	HaltedMessage,					// message that matches one recently relayed, and so was stopped
-	TestMessage,						// message with no contents, used to test number of routing pattern matches
-	RoutedMessage,					// message relayed to one or more matched clients
-	GlobalMessage,					// message matching all clients
-	InvalidMessage,					// message whose signature or timestamp did not validate
-	DeliveryRetry,					// resend of message that was not acknowledged the first time it was sent
-	DeliveryFailure,				// message was resent too many times with no acknowledgement, and has been given up on
-	NameUpdate,							// client set or changed its name
-	NameUpdateFailure,			// client tried to change its name to an invalid value
-	ClassAdd,								// client added itself to a class
-	ClassAddFailure,				// client tried to add an invalid class
-	ClassRemove,						// client removed itself from a class
-	ClassListRequest,				// client requested its class list
-	ClassListResponse,			// server responded to class list request
-	ClientListRequest,			// client requested the list of all connected clients
-	ClientListResponse,			// server responded to client list request
+	Acknowledge,							// ack
+	Create,										// client/server object created
+	ServerSubscribe,					// server received subscription request
+	ClientSubscribe,					// client received subscription confirmation
+	ServerSubscribeFailure,		// subscription didn't happen because of an error
+	ClientSubscribeFailure,		// client failed to subscribe
+	ServerUnsubscribe,				// server cancellation
+	ClientUnsubscribe,				// client cancellation
+	ServerUnsubscribeFailure,	// subscription didn't get canceled because of an error
+	ClientUnsubscribeFailure,	// client failed to unsubscribe
+	ServerLink,								// current server initiated a link to another
+	ServerLinkFailure,				// attempt to link to another server failed
+	ServerUnlink,							// current server closed a link to another
+	ReceiveMessage,						// message delivered to the current endpoint (e.g. client)
+	ReceiveFailure,						// could not receive data
+	SendMessage,							// message sent by the current endpoint
+	SendFailure,							// could not send data
+	DeadEndMessage,						// message that does not match any subscribed clients
+	HaltedMessage,						// message that matches one recently relayed, and so was stopped
+	TestMessage,							// message with no contents, used to test number of routing pattern matches
+	TestResponse,							// reply to client with number of clients matched by a test message
+	RoutedMessage,						// message relayed to one or more matched clients
+	GlobalMessage,						// message matching all clients
+	InvalidMessage,						// message whose signature or timestamp did not validate
+	DeliveryRetry,						// resend of message that was not acknowledged the first time it was sent
+	DeliveryFailure,					// message was resent too many times with no acknowledgement, and has been given up on
+	NameUpdate,								// client set or changed its name
+	NameUpdateFailure,				// client tried to change its name to an invalid value
+	ClassAdd,									// client added itself to a class
+	ClassAddFailure,					// client tried to add an invalid class
+	ClassRemove,							// client removed itself from a class
+	ClassListRequest,					// client requested its class list
+	ClassListResponse,				// server responded to class list request
+	ClientListRequest,				// client requested the list of all connected clients
+	ClientListResponse,				// server responded to client list request
 }
 
 pub struct Event {
 	pub class:EventClass,												// EventClass specifier
-	pub identifier:Vec<u8>,											// @name/#class of relevant endpoint
+	pub identifier:String,											// @name/#class of relevant endpoint
 	pub address:String,													// socket address of relevant endpoint
-	pub parameter:Vec<u8>,											// event parameter (e.g. routing expression)
-	pub contents:Vec<u8>,												// event contents (e.g. message payload)
+	pub parameter:String,												// event parameter (e.g. routing expression)
+	pub contents:String,												// event contents (e.g. message payload)
 	pub timestamp:DateTime<Local>,							// timestamp of event
 }
 
@@ -362,115 +370,101 @@ impl Event {
 
 	// formats the event as a human-readable string that can be printed to the console and/or written to log files.
 	pub fn to_string(&self) -> String {
-		let timestamp:String = format!("{} {}",self.timestamp.timestamp_millis(),self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
+		let timestamp:String = format!("{}",self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
 		match self.class {
 			EventClass::Acknowledge => {
-				return format!("[{}] Acknowledgement of [{}] by {} [{}]",
-					timestamp,bytes_to_hex(&self.contents.to_vec()),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] Acknowledgement of [{}] by {} [{}]",timestamp,&self.contents,&self.identifier,self.address);
 			},
 			EventClass::Create => {
-				return format!("[{}] Server initialized.",timestamp);
+				return format!("[{}] Initialization complete.",timestamp);
 			},
-			EventClass::Subscribe => {
-				return format!("[{}] Subscription requested by {} [{}] - {}",timestamp,String::from_utf8_lossy(&self.identifier),
-				self.address,String::from_utf8_lossy(&self.parameter));
+			EventClass::ServerSubscribe => {
+				return format!("[{}] Subscription requested by {} [{}] - {}",timestamp,&self.identifier,self.address,&self.parameter);
 			},
-			EventClass::Unsubscribe => {
-				return format!("[{}] Subscription closed by {} [{}]",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
+			EventClass::ServerUnsubscribe => {
+				return format!("[{}] Subscription closed by {} [{}]",timestamp,&self.identifier,self.address);
+			},
+			EventClass::ClientSubscribe => {
+				return format!("[{}] Subscribed to [{}]",timestamp,self.address);
+			},
+			EventClass::ClientUnsubscribe => {
+				return format!("[{}] Unsubscribed from [{}]",timestamp,self.address);
 			},
 			EventClass::ServerLink => {
-				return format!("[{}] Linked to server at [{}]",timestamp,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Linked to server at [{}]",timestamp,&self.contents);
 			},
 			EventClass::ServerLinkFailure => {
-				return format!("[{}] Could not link to server at [{}]: {}",timestamp,String::from_utf8_lossy(&self.contents),
-					String::from_utf8_lossy(&self.parameter));
+				return format!("[{}] Could not link to server at [{}]: {}",timestamp,&self.contents,&self.parameter);
 			},
 			EventClass::ServerUnlink => {
-				return format!("[{}] Unlinked from server at [{}]",timestamp,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Unlinked from server at [{}]",timestamp,&self.contents);
 			},
 			EventClass::ReceiveMessage => {
-				return format!("[{}] {} [{}] -> >[{}] {}",timestamp,String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents));
+				return format!("[{}] [RECEIVE] {} [{}] -> [{}] {}",timestamp,&self.identifier,self.address,&self.parameter,&self.contents);
 			},
 			EventClass::ReceiveFailure => {
-				return format!("[{}] Could not receive packet: {}",timestamp,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Could not receive packet: {}",timestamp,&self.contents);
 			},
 			EventClass::SendMessage => {
-				return format!("[{}] >[{}] {} -> {} [{}]",timestamp,String::from_utf8_lossy(&self.parameter),
-					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] [SEND] [{}] {}",timestamp,&self.parameter,self.contents);
 			},
 			EventClass::SendFailure => {
-				return format!("[{}] Could not send packet to {} [{}]: {}",timestamp,String::from_utf8_lossy(&self.identifier),
-					self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Could not send packet to {} [{}]: {}",timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::DeadEndMessage => {
-				return format!("[{}] Not relayed (no matching recipients): >[{}] {}",timestamp,String::from_utf8_lossy(&self.parameter),
-					String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Not relayed (no matching recipients): [{}] {}",timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::HaltedMessage => {
-				return format!("[{}] Not relayed (returning packet): >[{}] {}",timestamp,String::from_utf8_lossy(&self.parameter),
-					String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Not relayed (returning packet): [{}] {}",timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::TestMessage => {
-				return format!("[{}] Match test: >[{}] [matches {}]",timestamp,String::from_utf8_lossy(&self.parameter),
-					String::from_utf8_lossy(&self.contents));
+				return format!("[{}] Match test: [{}] [matches {}]",timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::RoutedMessage => {
-				return format!("[{}] [{}] {} -> {} [{}]",timestamp,bytes_to_hex(&self.parameter.to_vec()),
-					String::from_utf8_lossy(&self.contents),String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",timestamp,&self.parameter,&self.contents,&self.identifier,self.address);
 			},
 			EventClass::GlobalMessage => {
-				return format!("[{}] >[{}] {} -> [all clients]",timestamp,bytes_to_hex(&self.parameter.to_vec()),
-					String::from_utf8_lossy(&self.contents));
+				return format!("[{}] [GLOBAL] [{}] {} -> [all clients]",timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::InvalidMessage => {
-				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> >[{}] {}",timestamp,String::from_utf8_lossy(&self.identifier),self.address,
-					String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents));
+				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> [{}] {}",timestamp,&self.identifier,self.address,&self.parameter,&self.contents);
 			},
 			EventClass::DeliveryRetry => {
-				return format!("[{}] [resending] >[{}] {} -> {} [{}]",
-					timestamp,String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents),
-					String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] [resending] [{}] {} -> {} [{}]",
+					timestamp,&self.parameter,&self.contents,&self.identifier,self.address);
 			},
 			EventClass::DeliveryFailure => {
-				return format!("[{}] [delivery failed] >[{}] {} -> {} [{}]",
-					timestamp,String::from_utf8_lossy(&self.parameter),String::from_utf8_lossy(&self.contents),
-					String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] [delivery failed] [{}] {} -> {} [{}]",timestamp,&self.parameter,&self.contents,&self.identifier,self.address);
 			},
 			EventClass::NameUpdate => {
-				return format!("[{}] {} [{}] set name to @{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] {} [{}] set name to @{}",timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::NameUpdateFailure => {
-				return format!("[{}] {} [{}] could not set name to @{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] {} [{}] could not set name to @{}",timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::ClassAdd => {
-				return format!("[{}] {} [{}] added class #{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] {} [{}] added class #{}",timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::ClassAddFailure => {
 				return format!("[{}] {} [{}] could not add class #{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+					timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::ClassRemove => {
-				return format!("[{}] {} [{}] deleted class #{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] {} [{}] deleted class #{}",timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::ClassListRequest => {
-				return format!("[{}] {} [{}] requested class list.",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] {} [{}] requested class list.",timestamp,&self.identifier,self.address);
 			},
 			EventClass::ClassListResponse => {
-				return format!("[{}] class list for {} [{}]: #{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] class list for {} [{}]: #{}",timestamp,&self.identifier,self.address,&self.contents);
 			},
 			EventClass::ClientListRequest => {
-				return format!("[{}] {} [{}] requested client list.",timestamp,String::from_utf8_lossy(&self.identifier),self.address);
+				return format!("[{}] {} [{}] requested client list.",timestamp,&self.identifier,self.address);
 			},
 			EventClass::ClientListResponse => {
-				return format!("[{}] client list for {} [{}]: #{}",
-					timestamp,String::from_utf8_lossy(&self.identifier),self.address,String::from_utf8_lossy(&self.contents));
+				return format!("[{}] client list for {} [{}]: #{}",timestamp,&self.identifier,self.address,&self.contents);
 			},
+			_ => return String::new(),
 		};
 	}
 
@@ -522,6 +516,8 @@ pub struct Client {
 	pub subscribed:bool,																		// are we subscribed?
 	pub event_log:VecDeque<Event>,													// log of events produced by the client
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
+	pub recent_packets:VecDeque<[u8;8]>,										// hashes of packets that were recently seen, to merge double-sends
+	pub max_recent_packets:usize,														// max number of recent packet hashes to store
 	pub max_resend_tries:u64,																// maximum number of tries to resend a packet before discarding it
 	pub uptime:i64,																					// time at which this client was created
 	pub time_tolerance_ms:i64,															// maximum time difference a packet can have from now and still be considered valid
@@ -530,7 +526,11 @@ pub struct Client {
 
 // client constructor, which takes a pad file path, a server address, and a local port
 // number and produces a new client object. also calls the Crypt constructor.
-pub fn new_client(pad_path:&str,server_address:SocketAddr,local_port:u16) -> Result<Client,io::Error> {
+pub fn new_client(pad_path:&str,string_address:&str,local_port:u16) -> Result<Client,io::Error> {
+	let server_address:SocketAddr = match SocketAddr::from_str(&string_address) {
+		Err(_why) => return Err(io::Error::new(io::ErrorKind::InvalidData,"could not parse argument as a socket address")),
+		Ok(addr) => addr,
+	};
 	let new_crypt:Crypt = match new_crypt(&pad_path) {
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
@@ -547,7 +547,9 @@ pub fn new_client(pad_path:&str,server_address:SocketAddr,local_port:u16) -> Res
 				event_log:VecDeque::new(),
 				subscribed:false,
 				unacked_packets:HashMap::new(),
-				max_resend_tries:10,
+				recent_packets:VecDeque::new(),
+				max_recent_packets:32,
+				max_resend_tries:3,
 				crypt:new_crypt,
 				uptime:Local::now().timestamp_millis(),
 				time_tolerance_ms:3000,
@@ -555,10 +557,10 @@ pub fn new_client(pad_path:&str,server_address:SocketAddr,local_port:u16) -> Res
 			};
 			created_client.event_log.push_back(Event {
 				class:EventClass::Create,
-				identifier:b"local".to_vec(),
+				identifier:String::from("local"),
 				address:String::new(),
-				parameter:vec![],
-				contents:vec![],
+				parameter:String::new(),
+				contents:String::new(),
 				timestamp:Local::now(),
 			});
 			return Ok(created_client);
@@ -656,10 +658,10 @@ impl Client {
 					_ => {
 						self.event_log.push_back(Event {
 							class:EventClass::ReceiveFailure,
-							identifier:b"local".to_vec(),
+							identifier:String::from("local"),
 							address:String::new(),
-							parameter:vec![],
-							contents:format!("{}",why).as_bytes().to_vec(),
+							parameter:String::new(),
+							contents:format!("{}",why),
 							timestamp:Local::now(),
 						});
 						return Err(why);
@@ -672,54 +674,86 @@ impl Client {
 						let mut sha3 = Keccak::new_sha3_256();
 						sha3.update(&input_buffer[..receive_length]);
 						sha3.finalize(&mut packet_hash);
+						if self.recent_packets.contains(&packet_hash) {
+							self.event_log.push_back(Event {
+								class:EventClass::HaltedMessage,
+								identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
+								address:format!("{}",&source_address),
+								parameter:String::new(),
+								contents:bytes_to_hex(&packet_hash.to_vec()),
+								timestamp:Local::now(),
+							});
+							return Ok(());
+						}
 						if received_packet.valid && received_packet.parameter.len() > 0 {
 							match (received_packet.parameter[0],received_packet.payload.len()) {
-								(0x06,8) => {
+								(0x03,16) => {
 									let mut acked_hash:[u8;8] = [0;8];
-									acked_hash.copy_from_slice(&received_packet.payload[..]);
+									let mut number_matched_bytes:[u8;8] = [0;8];
+									acked_hash.copy_from_slice(&received_packet.payload[..8]);
+									number_matched_bytes.copy_from_slice(&received_packet.payload[8..]);
+									let number_matched:u64 = bytes_to_u64(&number_matched_bytes);
+									let _ = self.unacked_packets.remove(&acked_hash);
+									self.event_log.push_back(Event {
+										class:EventClass::TestResponse,
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:format!("{}",&source_address),
+										parameter:format!("{}",&number_matched),
+										contents:bytes_to_hex(&acked_hash.to_vec()),
+										timestamp:Local::now(),
+									});
+								},
+								(0x06,16) => {
+									let mut acked_hash:[u8;8] = [0;8];
+									let mut number_matched_bytes:[u8;8] = [0;8];
+									acked_hash.copy_from_slice(&received_packet.payload[..8]);
+									number_matched_bytes.copy_from_slice(&received_packet.payload[8..]);
+									let number_matched:u64 = bytes_to_u64(&number_matched_bytes);
 									let _ = self.unacked_packets.remove(&acked_hash);
 									self.event_log.push_back(Event {
 										class:EventClass::Acknowledge,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:acked_hash.to_vec(),
+										parameter:format!("{}",&number_matched),
+										contents:bytes_to_hex(&acked_hash.to_vec()),
 										timestamp:Local::now(),
 									});
 								},
 								(0x06,0) => {
 									self.event_log.push_back(Event {
 										class:EventClass::Acknowledge,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:vec![],
+										parameter:String::new(),
+										contents:String::new(),
 										timestamp:Local::now(),
 									});
 								}
 								(0x19,0) => {
 									self.event_log.push_back(Event {
-										class:EventClass::Unsubscribe,
-										identifier:b"server".to_vec(),
+										class:EventClass::ClientUnsubscribe,
+										identifier:String::from("server"),
 										address:String::new(),
-										parameter:vec![],
-										contents:vec![],
+										parameter:String::new(),
+										contents:String::new(),
 										timestamp:Local::now(),
 									});
 									if self.subscribed { 
-										match self.send_packet(&vec![0x02],&packet_hash.to_vec()) {
+										match self.subscribe() {
 											Err(why) => return Err(why),
 											Ok(_) => (),
 										};
-										self.event_log.push_back(Event {
-											class:EventClass::Subscribe,
-											identifier:b"local".to_vec(),
-											address:String::new(),
-											parameter:vec![],
-											contents:vec![],
-											timestamp:Local::now(),
-										});
 									}
+								}
+								(0x02,0) => {
+									self.event_log.push_back(Event {
+										class:EventClass::ClientSubscribe,
+										identifier:String::from("local"),
+										address:format!("{}",&self.server_address),
+										parameter:String::new(),
+										contents:String::new(),
+										timestamp:Local::now(),
+									});
 								}
 								(b'>',_) => {
 									match self.send_packet(&vec![0x06],&packet_hash.to_vec()) {
@@ -728,10 +762,10 @@ impl Client {
 									};
 									self.event_log.push_back(Event {
 										class:EventClass::ReceiveMessage,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&received_packet.source),
-										parameter:received_packet.parameter.clone(),
-										contents:received_packet.payload.clone(),
+										parameter:String::from_utf8_lossy(&received_packet.parameter).to_string(),
+										contents:String::from_utf8_lossy(&received_packet.payload).to_string(),
 										timestamp:Local::now(),
 									});
 								},
@@ -741,11 +775,11 @@ impl Client {
 										Ok(_) => (),
 									};
 									self.event_log.push_back(Event {
-										class:EventClass::InvalidMessage,
-										identifier:received_packet.sender.clone(),
+										class:EventClass::ReceiveMessage,
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&received_packet.source),
-										parameter:received_packet.parameter.clone(),
-										contents:received_packet.payload.clone(),
+										parameter:bytes_to_hex(&received_packet.parameter),
+										contents:bytes_to_hex(&received_packet.payload),
 										timestamp:Local::now(),
 									});
 								},
@@ -757,10 +791,10 @@ impl Client {
 							};
 							self.event_log.push_back(Event {
 								class:EventClass::InvalidMessage,
-								identifier:received_packet.sender.clone(),
+								identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 								address:format!("{}",&received_packet.source),
-								parameter:received_packet.parameter.clone(),
-								contents:received_packet.payload.clone(),
+								parameter:String::from_utf8_lossy(&received_packet.parameter).to_string(),
+								contents:String::from_utf8_lossy(&received_packet.payload).to_string(),
 								timestamp:Local::now(),
 							});
 						}
@@ -793,24 +827,16 @@ impl Client {
 			Err(why) => {
 				self.event_log.push_back(Event {
 					class:EventClass::SendFailure,
-					identifier:b"server".to_vec(),
+					identifier:String::from("server"),
 					address:format!("{}",&self.server_address),
-					parameter:vec![],
-					contents:format!("{}",why).as_bytes().to_vec(),
+					parameter:String::new(),
+					contents:format!("{}",why),
 					timestamp:Local::now(),
 				});
 				return Err(why);
 			},
 			Ok(_) => (),
 		};
-		self.event_log.push_back(Event {
-			class:EventClass::SendMessage,
-			identifier:b"server".to_vec(),
-			address:format!("{}",&self.server_address),
-			parameter:parameter.clone(),
-			contents:payload.clone(),
-			timestamp:Local::now(),
-		});
 		if parameter.len() > 0 && parameter[0] == b'>' {
 			let mut packet_hash:[u8;8] = [0;8];
 			let mut sha3 = Keccak::new_sha3_256();
@@ -825,6 +851,14 @@ impl Client {
 				recipient:b"server".to_vec(),
 				parameter:parameter.clone(),
 				payload:payload.clone(),
+			});
+			self.event_log.push_back(Event {
+				class:EventClass::SendMessage,
+				identifier:String::from("server"),
+				address:format!("{}",&self.server_address),
+				parameter:String::from_utf8_lossy(&parameter).to_string(),
+				contents:String::from_utf8_lossy(&payload).to_string(),
+				timestamp:Local::now(),
 			});
 		}
 		return Ok(());
@@ -861,20 +895,20 @@ impl Client {
 					}
 					self.event_log.push_back(Event {
 						class:EventClass::DeliveryRetry,
-						identifier:unacked_packet.1.recipient.clone(),
+						identifier:String::from_utf8_lossy(&unacked_packet.1.recipient).to_string(),
 						address:format!("{}",&self.server_address),
-						parameter:packet_hash.to_vec(),
-						contents:unacked_packet.1.payload.clone(),
+						parameter:bytes_to_hex(&packet_hash.to_vec()),
+						contents:String::from_utf8_lossy(&unacked_packet.1.payload).to_string(),
 						timestamp:Local::now(),
 					});
 				} else {
 					self.unacked_packets.remove(packet_hash);
 					self.event_log.push_back(Event {
 						class:EventClass::DeliveryFailure,
-						identifier:unacked_packet.1.recipient.clone(),
+						identifier:String::from_utf8_lossy(&unacked_packet.1.recipient).to_string(),
 						address:format!("{}",&self.server_address),
-						parameter:packet_hash.to_vec(),
-						contents:unacked_packet.1.payload.clone(),
+						parameter:bytes_to_hex(&packet_hash.to_vec()),
+						contents:String::from_utf8_lossy(&unacked_packet.1.payload).to_string(),
 						timestamp:Local::now(),
 					});
 				}
@@ -888,18 +922,95 @@ impl Client {
 	// 0x15 if something's wrong (e.g. server full) or an unreadable packet
 	// if we have the wrong pad file.
 	pub fn subscribe(&mut self) -> Result<(),io::Error> {
+		let mut original_timeout:Option<Duration> = None;
+		if let Ok(timeout) = self.socket.read_timeout() {
+			original_timeout = timeout;
+		}
+		match self.socket.set_read_timeout(Some(
+			Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ClientSubscribeFailure,
+					identifier:String::from("local"),
+					address:String::new(),
+					parameter:String::from("failed to transmit packet"),
+					contents:String::new(),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			},
+			Ok(_) => (),
+		};
 		match self.send_packet(&vec![0x02],&vec![]) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		self.event_log.push_back(Event {
-			class:EventClass::Subscribe,
-			identifier:b"local".to_vec(),
-			address:String::new(),
-			parameter:vec![],
-			contents:vec![],
-			timestamp:Local::now(),
-		});
+		let mut input_buffer:[u8;8192] = [0;8192];
+		let wait_start:i64 = Local::now().timestamp_millis();
+		loop {
+			match self.socket.recv_from(&mut input_buffer) {
+				Err(why) => match why.kind() {
+					io::ErrorKind::WouldBlock => {
+						self.event_log.push_back(Event {
+							class:EventClass::ClientSubscribeFailure,
+							identifier:String::from("local"),
+							address:String::new(),
+							parameter:String::from("no response"),
+							contents:format!("{}",&self.server_address),
+							timestamp:Local::now(),
+						});
+						return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
+					},
+					_ => {
+						self.event_log.push_back(Event {
+							class:EventClass::ClientSubscribeFailure,
+							identifier:String::from("local"),
+							address:String::new(),
+							parameter:String::from("receiving response failed"),
+							contents:format!("{}",&self.server_address),
+							timestamp:Local::now(),
+						});
+						return Err(why);
+					},
+				},
+				Ok((receive_length,source_address)) => {
+					let received_packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
+					if received_packet.parameter.len() > 0 && source_address == self.server_address {
+						match received_packet.parameter[0] {
+							0x06 => break,
+							0x02 => break,
+							0x15 => {
+								self.event_log.push_back(Event {
+									class:EventClass::ClientSubscribeFailure,
+									identifier:String::from("local"),
+									address:String::new(),
+									parameter:String::from("connection refused"),
+									contents:format!("{}",&self.server_address),
+									timestamp:Local::now(),
+								});
+								return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"connection refused by server"));
+							},
+							_ => continue,
+						}
+					}
+				},
+			};
+			if Local::now().timestamp_millis() > wait_start+self.time_tolerance_ms {
+				self.event_log.push_back(Event {
+					class:EventClass::ClientSubscribeFailure,
+					identifier:String::from("local"),
+					address:String::new(),
+					parameter:String::from("no response"),
+					contents:format!("{}",&self.server_address),
+					timestamp:Local::now(),
+				});
+				return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
+			}
+		}
+		match self.socket.set_read_timeout(original_timeout) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
 		self.subscribed = true;
 		return Ok(());
 	}
@@ -912,11 +1023,11 @@ impl Client {
 			Ok(_) => (),
 		};
 		self.event_log.push_back(Event {
-			class:EventClass::Unsubscribe,
-			identifier:b"local".to_vec(),
+			class:EventClass::ClientUnsubscribe,
+			identifier:String::from("local"),
 			address:String::new(),
-			parameter:vec![],
-			contents:vec![],
+			parameter:String::new(),
+			contents:String::new(),
 			timestamp:Local::now(),
 		});
 		self.subscribed = false;
@@ -933,10 +1044,10 @@ impl Client {
 		self.name = name.to_owned();
 		self.event_log.push_back(Event {
 			class:EventClass::NameUpdate,
-			identifier:b"local".to_vec(),
-			address:String::new(),
-			parameter:vec![],
-			contents:name.as_bytes().to_vec(),
+			identifier:String::from("client"),
+			address:String::from("local"),
+			parameter:String::new(),
+			contents:name.to_owned(),
 			timestamp:Local::now(),
 		});
 		return Ok(());
@@ -952,10 +1063,10 @@ impl Client {
 		self.classes.push(class.to_owned());
 		self.event_log.push_back(Event {
 			class:EventClass::ClassAdd,
-			identifier:b"local".to_vec(),
-			address:String::new(),
-			parameter:vec![],
-			contents:class.as_bytes().to_vec(),
+			identifier:String::from("client"),
+			address:String::from("local"),
+			parameter:String::new(),
+			contents:class.to_owned(),
 			timestamp:Local::now(),
 		});
 		return Ok(());
@@ -975,10 +1086,10 @@ impl Client {
 		}
 		self.event_log.push_back(Event {
 			class:EventClass::ClassRemove,
-			identifier:b"local".to_vec(),
-			address:String::new(),
-			parameter:vec![],
-			contents:class.as_bytes().to_vec(),
+			identifier:String::from("client"),
+			address:String::from("local"),
+			parameter:String::new(),
+			contents:class.to_owned(),
 			timestamp:Local::now(),
 		});
 		return Ok(());
@@ -995,8 +1106,8 @@ pub struct Subscription {
 	pub name:String,																				// subscriber's self-declared name
 	pub classes:Vec<String>,																// subscriber's self-declared classes
 	pub uptime:i64,																					// time at which this subscription was created
-	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,							// packets that need to be resent if they aren't acknowledged
-	pub delivery_failures:u64,
+	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
+	pub delivery_failures:u64,															// number of times a packet delivery has failed for this subscriber
 }
 
 // server object for holding server parameters and subscriptions.
@@ -1043,7 +1154,7 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 				max_recent_packets:64,
 				max_unsent_packets:32,
 				max_resend_tries:10,
-				max_resend_failures:10,
+				max_resend_failures:1,
 				crypt:new_crypt,
 				receive_queue:VecDeque::new(),
 				uptime:Local::now().timestamp_millis(),
@@ -1052,10 +1163,10 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 			};
 			created_server.event_log.push_back(Event {
 				class:EventClass::Create,
-				identifier:b"local".to_vec(),
+				identifier:String::from("local"),
 				address:String::new(),
-				parameter:vec![],
-				contents:vec![],
+				parameter:String::new(),
+				contents:String::new(),
 				timestamp:Local::now(),
 			});
 			return Ok(created_server);
@@ -1144,16 +1255,16 @@ impl Server {
 
 	pub fn link_server(&mut self,remote_address:&SocketAddr) -> Result<(),io::Error> {
 		let server_name:String = self.name.clone();
-		let mut current_timeout:Option<Duration> = None;
+		let mut original_timeout:Option<Duration> = None;
 		if let Ok(timeout) = self.socket.read_timeout() {
-			current_timeout = timeout;
+			original_timeout = timeout;
 		}
 		let send_fail = Event {
 			class:EventClass::ServerLinkFailure,
-			identifier:b"local".to_vec(),
+			identifier:String::from("local"),
 			address:String::new(),
-			parameter:b"transmitting packet failed".to_vec(),
-			contents:format!("{}",&remote_address).as_bytes().to_vec(),
+			parameter:String::from("transmitting packet failed"),
+			contents:format!("{}",&remote_address),
 			timestamp:Local::now(),
 		};
 		match self.socket.set_read_timeout(Some(
@@ -1179,10 +1290,10 @@ impl Server {
 					io::ErrorKind::WouldBlock => {
 						self.event_log.push_back(Event {
 							class:EventClass::ServerLinkFailure,
-							identifier:b"local".to_vec(),
+							identifier:String::from("local"),
 							address:String::new(),
-							parameter:b"no response".to_vec(),
-							contents:format!("{}",&remote_address).as_bytes().to_vec(),
+							parameter:String::from("no response"),
+							contents:format!("{}",&remote_address),
 							timestamp:Local::now(),
 						});
 						return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
@@ -1190,10 +1301,10 @@ impl Server {
 					_ => {
 						self.event_log.push_back(Event {
 							class:EventClass::ServerLinkFailure,
-							identifier:b"local".to_vec(),
+							identifier:String::from("local"),
 							address:String::new(),
-							parameter:b"receiving response failed".to_vec(),
-							contents:format!("{}",&remote_address).as_bytes().to_vec(),
+							parameter:String::from("receiving response failed"),
+							contents:format!("{}",&remote_address),
 							timestamp:Local::now(),
 						});
 						return Err(why);
@@ -1208,10 +1319,10 @@ impl Server {
 							0x15 => {
 								self.event_log.push_back(Event {
 									class:EventClass::ServerLinkFailure,
-									identifier:b"local".to_vec(),
+									identifier:String::from("local"),
 									address:String::new(),
-									parameter:b"connection refused".to_vec(),
-									contents:format!("{}",&remote_address).as_bytes().to_vec(),
+									parameter:String::from("connection refused"),
+									contents:format!("{}",&remote_address),
 									timestamp:Local::now(),
 								});
 								return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"connection refused by server"));
@@ -1224,10 +1335,10 @@ impl Server {
 			if Local::now().timestamp_millis() > wait_start+self.time_tolerance_ms {
 				self.event_log.push_back(Event {
 					class:EventClass::ServerLinkFailure,
-					identifier:b"local".to_vec(),
+					identifier:String::from("local"),
 					address:String::new(),
-					parameter:b"no response".to_vec(),
-					contents:format!("{}",&remote_address).as_bytes().to_vec(),
+					parameter:String::from("no response"),
+					contents:format!("{}",&remote_address),
 					timestamp:Local::now(),
 				});
 				return Err(io::Error::new(io::ErrorKind::NotFound,"no response from server"));
@@ -1241,7 +1352,7 @@ impl Server {
 			},
 			Ok(_) => (),
 		};
-		match self.socket.set_read_timeout(current_timeout) {
+		match self.socket.set_read_timeout(original_timeout) {
 			Err(why) => {
 				self.event_log.push_back(send_fail);
 				return Err(why);
@@ -1258,10 +1369,10 @@ impl Server {
 		});	
 		self.event_log.push_back(Event {
 			class:EventClass::ServerLink,
-			identifier:b"local".to_vec(),
+			identifier:String::from("local"),
 			address:String::new(),
-			parameter:vec![],
-			contents:format!("{}",&remote_address).as_bytes().to_vec(),
+			parameter:String::new(),
+			contents:format!("{}",&remote_address),
 			timestamp:Local::now(),
 		});
 		return Ok(());
@@ -1281,10 +1392,10 @@ impl Server {
 		}
 		self.event_log.push_back(Event {
 			class:EventClass::ServerUnlink,
-			identifier:b"local".to_vec(),
+			identifier:String::from("local"),
 			address:String::new(),
-			parameter:vec![],
-			contents:format!("{}",&remote_address).as_bytes().to_vec(),
+			parameter:String::new(),
+			contents:format!("{}",&remote_address),
 			timestamp:Local::now(),
 		});
 		return Ok(());
@@ -1312,10 +1423,10 @@ impl Server {
 			Err(why) => {
 				self.event_log.push_back(Event {
 					class:EventClass::SendFailure,
-					identifier:recipient.as_bytes().to_vec(),
+					identifier:recipient.to_owned(),
 					address:format!("{}",&address),
-					parameter:vec![],
-					contents:format!("{}",why).as_bytes().to_vec(),
+					parameter:String::new(),
+					contents:format!("{}",why),
 					timestamp:Local::now(),
 				});
 				return Err(why);
@@ -1339,15 +1450,15 @@ impl Server {
 					payload:payload.clone(),
 				});
 			}
+			self.event_log.push_back(Event {
+				class:EventClass::SendMessage,
+				identifier:recipient.to_owned(),
+				address:format!("{}",&address),
+				parameter:String::from_utf8_lossy(&parameter).to_string(),
+				contents:String::from_utf8_lossy(&payload).to_string(),
+				timestamp:Local::now(),
+			});
 		}
-		self.event_log.push_back(Event {
-			class:EventClass::SendMessage,
-			identifier:recipient.as_bytes().to_vec(),
-			address:format!("{}",&address),
-			parameter:parameter.clone(),
-			contents:payload.clone(),
-			timestamp:Local::now(),
-		});
 		return Ok(());
 	}
 	
@@ -1367,13 +1478,14 @@ impl Server {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
 					io::ErrorKind::WouldBlock => break,
+					io::ErrorKind::Interrupted => break,
 					_ => {
 						self.event_log.push_back(Event {
 							class:EventClass::ReceiveFailure,
-							identifier:b"local".to_vec(),
+							identifier:String::from("local"),
 							address:String::new(),
-							parameter:vec![],
-							contents:format!("{}",why).as_bytes().to_vec(),
+							parameter:String::new(),
+							contents:format!("{}",why),
 							timestamp:Local::now(),
 						});
 						sleep(Duration::new(0,100));
@@ -1413,11 +1525,11 @@ impl Server {
 								Ok(_) => (),
 							};
 							self.event_log.push_back(Event {
-								class:EventClass::Subscribe,
-								identifier:received_packet.sender.clone(),
+								class:EventClass::ServerSubscribe,
+								identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 								address:format!("{}",&source_address),
-								parameter:b"accepted".to_vec(),
-								contents:vec![],
+								parameter:String::from("accepted"),
+								contents:String::new(),
 								timestamp:Local::now(),
 							});
 						} else {
@@ -1436,11 +1548,11 @@ impl Server {
 								reject_reason = "server full";
 							}
 							self.event_log.push_back(Event {
-								class:EventClass::Subscribe,
-								identifier:received_packet.sender.clone(),
+								class:EventClass::ServerSubscribe,
+								identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 								address:format!("{}",&source_address),
-								parameter:format!("rejected ({})",&reject_reason).as_bytes().to_vec(),
-								contents:vec![],
+								parameter:format!("rejected ({})",&reject_reason),
+								contents:String::new(),
 								timestamp:Local::now(),
 							});
 						}
@@ -1455,20 +1567,20 @@ impl Server {
 								}
 								self.event_log.push_back(Event {
 									class:EventClass::Acknowledge,
-									identifier:received_packet.sender.clone(),
+									identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 									address:format!("{}",&source_address),
-									parameter:vec![],
-									contents:acked_hash.to_vec(),
+									parameter:String::new(),
+									contents:bytes_to_hex(&acked_hash.to_vec()),
 									timestamp:Local::now(),
 								});
 							},
 							(0x06,_) => {
 								self.event_log.push_back(Event {
 									class:EventClass::Acknowledge,
-									identifier:received_packet.sender.clone(),
+									identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 									address:format!("{}",&source_address),
-									parameter:vec![],
-									contents:vec![],
+									parameter:String::new(),
+									contents:String::new(),
 									timestamp:Local::now(),
 								});
 							},
@@ -1481,11 +1593,11 @@ impl Server {
 									Ok(_) => (),
 								};
 								self.event_log.push_back(Event {
-									class:EventClass::Unsubscribe,
-									identifier:received_packet.sender.clone(),
+									class:EventClass::ServerUnsubscribe,
+									identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 									address:format!("{}",&source_address),
-									parameter:vec![],
-									contents:vec![],
+									parameter:String::new(),
+									contents:String::new(),
 									timestamp:Local::now(),
 								});
 							},
@@ -1512,10 +1624,10 @@ impl Server {
 									};
 									self.event_log.push_back(Event {
 										class:EventClass::NameUpdate,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:new_name.as_bytes().to_vec(),
+										parameter:String::new(),
+										contents:new_name.to_owned(),
 										timestamp:Local::now(),
 									});
 								} else {
@@ -1526,10 +1638,10 @@ impl Server {
 									};
 									self.event_log.push_back(Event {
 										class:EventClass::NameUpdateFailure,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:new_name.as_bytes().to_vec(),
+										parameter:String::new(),
+										contents:new_name.to_owned(),
 										timestamp:Local::now(),
 									});
 								}
@@ -1559,10 +1671,10 @@ impl Server {
 									};
 									self.event_log.push_back(Event {
 										class:EventClass::ClassAdd,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:new_class.as_bytes().to_vec(),
+										parameter:String::new(),
+										contents:new_class.to_owned(),
 										timestamp:Local::now(),
 									});
 								} else {
@@ -1573,10 +1685,10 @@ impl Server {
 									};
 									self.event_log.push_back(Event {
 										class:EventClass::ClassAddFailure,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:new_class.as_bytes().to_vec(),
+										parameter:String::new(),
+										contents:new_class.to_owned(),
 										timestamp:Local::now(),
 									});
 								}
@@ -1597,10 +1709,10 @@ impl Server {
 								};
 								self.event_log.push_back(Event {
 									class:EventClass::ClassRemove,
-									identifier:received_packet.sender.clone(),
+									identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 									address:format!("{}",&source_address),
-									parameter:vec![],
-									contents:deleted_class.as_bytes().to_vec(),
+									parameter:String::new(),
+									contents:deleted_class.to_owned(),
 									timestamp:Local::now(),
 								});
 							},
@@ -1608,54 +1720,47 @@ impl Server {
 								if let Some(mut sub) = self.subscribers.clone().get(&source_address) {
 									self.event_log.push_back(Event {
 										class:EventClass::ClassListRequest,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&source_address),
-										parameter:vec![],
-										contents:vec![],
+										parameter:String::new(),
+										contents:String::new(),
 										timestamp:Local::now(),
 									});
 									for class in sub.classes.iter() {
-										match self.send_packet(&vec![],&vec![0x13],&class.as_bytes().to_vec(),&source_address) {
+										match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
+											&vec![0x13],&class.as_bytes().to_vec(),&source_address) {
 											Err(why) => return Err(why),
 											Ok(_) => (),
 										};
 										self.event_log.push_back(Event {
 											class:EventClass::ClassListResponse,
-											identifier:received_packet.sender.clone(),
+											identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 											address:format!("{}",&source_address),
-											parameter:vec![],
-											contents:class.as_bytes().to_vec(),
+											parameter:String::new(),
+											contents:class.to_owned(),
 											timestamp:Local::now(),
 										});
 									}
 								}
 							}
 							(b'>',_) => {
-								let mut packet_hash:[u8;8] = [0;8];
-								let mut sha3 = Keccak::new_sha3_256();
-								sha3.update(&input_buffer[..receive_length]);
-								sha3.finalize(&mut packet_hash);
-								match self.send_packet(&vec![],&vec![0x06],&packet_hash.to_vec(),&source_address) {
-									Err(why) => return Err(why),
-									Ok(_) => (),
-								};
 								if received_packet.valid {
 									self.event_log.push_back(Event {
 										class:EventClass::ReceiveMessage,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&received_packet.source),
-										parameter:received_packet.parameter.clone(),
-										contents:received_packet.payload.clone(),
+										parameter:String::from_utf8_lossy(&received_packet.parameter).to_string(),
+										contents:String::from_utf8_lossy(&received_packet.payload).to_string(),
 										timestamp:Local::now(),
 									});
 									self.receive_queue.push_back(received_packet);
 								} else {
 									self.event_log.push_back(Event {
 										class:EventClass::InvalidMessage,
-										identifier:received_packet.sender.clone(),
+										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:format!("{}",&received_packet.source),
-										parameter:received_packet.parameter.clone(),
-										contents:received_packet.payload.clone(),
+										parameter:String::from_utf8_lossy(&received_packet.parameter).to_string(),
+										contents:String::from_utf8_lossy(&received_packet.payload).to_string(),
 										timestamp:Local::now(),
 									});
 								}
@@ -1722,10 +1827,10 @@ impl Server {
 							}
 							self.event_log.push_back(Event {
 								class:EventClass::DeliveryRetry,
-								identifier:unacked_packet.1.recipient.clone(),
+								identifier:String::from_utf8_lossy(&unacked_packet.1.recipient).to_string(),
 								address:format!("{}",&sub.0),
-								parameter:unacked_packet.1.parameter.clone(),
-								contents:unacked_packet.1.payload.clone(),
+								parameter:String::from_utf8_lossy(&unacked_packet.1.parameter).to_string(),
+								contents:String::from_utf8_lossy(&unacked_packet.1.payload).to_string(),
 								timestamp:Local::now(),
 							});
 						} else {
@@ -1733,10 +1838,10 @@ impl Server {
 							list_sub.delivery_failures += 1;
 							self.event_log.push_back(Event {
 								class:EventClass::DeliveryFailure,
-								identifier:unacked_packet.1.recipient.clone(),
+								identifier:String::from_utf8_lossy(&unacked_packet.1.recipient).to_string(),
 								address:format!("{}",&sub.0),
-								parameter:unacked_packet.1.parameter.clone(),
-								contents:unacked_packet.1.payload.clone(),
+								parameter:String::from_utf8_lossy(&unacked_packet.1.parameter).to_string(),
+								contents:String::from_utf8_lossy(&unacked_packet.1.payload).to_string(),
 								timestamp:Local::now(),
 							});
 						}			
@@ -1751,10 +1856,10 @@ impl Server {
 		if !packet.valid {
 			self.event_log.push_back(Event {
 				class:EventClass::InvalidMessage,
-				identifier:packet.sender.clone(),
+				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:packet.parameter.clone(),
-				contents:packet.payload.clone(),
+				parameter:String::from_utf8_lossy(&packet.parameter).to_string(),
+				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay invalid packet"));
@@ -1766,10 +1871,10 @@ impl Server {
 		if self.recent_packets.contains(&packet_hash) {
 			self.event_log.push_back(Event {
 				class:EventClass::HaltedMessage,
-				identifier:packet.sender.clone(),
+				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:packet.parameter.clone(),
-				contents:packet.payload.clone(),
+				parameter:String::from_utf8_lossy(&packet.parameter).to_string(),
+				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
 			return Ok(());
@@ -1791,18 +1896,24 @@ impl Server {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
+					let mut recipient:String;
+					if sub.1.classes.len() > 0 {
+						recipient = format!("@{}/#{}",sub.1.name,sub.1.classes[0]);
+					} else {
+						recipient = format!("@{}",sub.1.name);
+					}
 					if packet.parameter.len() > 1 {
 						self.event_log.push_back(Event {
 							class:EventClass::RoutedMessage,
-							identifier:packet.sender.clone(),
-							address:format!("{}",&packet.source),
-							parameter:packet_hash.to_vec(),
-							contents:packet.payload.clone(),
+							identifier:recipient,
+							address:format!("{}",&sub.0),
+							parameter:bytes_to_hex(&packet_hash.to_vec()),
+							contents:String::from_utf8_lossy(&packet.payload).to_string(),
 							timestamp:Local::now(),
 						});
 					}
 					self.recent_packets.push_back(packet_hash.clone());
-					if self.recent_packets.len() > self.max_recent_packets {
+					while self.recent_packets.len() > self.max_recent_packets {
 						let _ = self.recent_packets.pop_front();
 					}
 					if let Some(mut listed_sub) = self.subscribers.get_mut(&sub.0) {
@@ -1826,13 +1937,16 @@ impl Server {
 				}	
 				number_matched += 1;
 			}
+			let mut ack_payload:Vec<u8> = Vec::new();
+			ack_payload.append(&mut packet_hash.to_vec());
+			ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
 			if send {
-				match self.send_packet(&vec![],&vec![0x06],&u64_to_bytes(&number_matched).to_vec(),&packet.source) {
+				match self.send_packet(&vec![],&vec![0x06],&ack_payload,&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
 			} else {
-				match self.send_packet(&vec![],&vec![0x03],&u64_to_bytes(&number_matched).to_vec(),&packet.source) {
+				match self.send_packet(&vec![],&vec![0x03],&ack_payload.to_vec(),&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
@@ -1841,28 +1955,28 @@ impl Server {
 		if !send {
 			self.event_log.push_back(Event {
 				class:EventClass::TestMessage,
-				identifier:packet.sender.clone(),
+				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:packet.parameter.clone(),
-				contents:format!("{}",&number_matched).as_bytes().to_vec(),
+				parameter:number_matched.to_string(),
+				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
 		} else if number_matched == 0 {
 			self.event_log.push_back(Event {
 				class:EventClass::DeadEndMessage,
-				identifier:packet.sender.clone(),
+				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:packet.parameter.clone(),
-				contents:packet.payload.clone(),
+				parameter:String::from_utf8_lossy(&packet.parameter).to_string(),
+				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
 		} else if packet.parameter.len() <= 1 {
 			self.event_log.push_back(Event {
 				class:EventClass::GlobalMessage,
-				identifier:packet.sender.clone(),
+				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:packet_hash.to_vec(),
-				contents:packet.payload.clone(),
+				parameter:String::from_utf8_lossy(&packet.parameter).to_string(),
+				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
 		}

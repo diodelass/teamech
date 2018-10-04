@@ -1,10 +1,11 @@
 [package]
-name = "teamech"
+name = "teamech-console"
 version = "0.8.0"
 authors = ["Ellie D. <sporillium@gmail.com>"]
 
 [dependencies]
-tiny-keccak = "1.4.2"
-rand = "0.3"
-byteorder = "1"
+teamech = { path = "../.." }
+clap = "2"
+pancurses = "0.16"
+dirs = "1.0.3"
 chrono = "0.4"
