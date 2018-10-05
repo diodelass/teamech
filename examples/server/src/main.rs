@@ -1,11 +1,71 @@
-static VERSION:&str = "0.8.1 October 2018";
+static VERSION:&str = "0.8.2 October 2018";
+static LOG_DIRECTORY:&str = ".teamech-logs/server/";
 
 extern crate teamech;
 
 #[macro_use]
 extern crate clap;
 
+extern crate dirs;
+use dirs::home_dir;
+
+extern crate chrono;
+use chrono::prelude::*;
+
 use std::process;
+use std::path::{Path,PathBuf};
+use std::io;
+use std::io::prelude::*;
+use std::fs;
+use std::fs::File;
+
+struct Logger {
+	log_file_name:String,
+}
+
+impl Logger {
+
+	// Accepts a path to a log file, and writes a line to it, generating a human- and machine-readable log.
+	fn log_to_file(&self,logstring:&str) -> Result<(),io::Error> {
+		let userhome:PathBuf = match home_dir() {
+			None => PathBuf::new(),
+			Some(pathbuf) => pathbuf,
+		};
+		let logdir:&Path = &userhome.as_path().join(&LOG_DIRECTORY);
+		match fs::create_dir_all(&logdir) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		let logpath:&Path = &logdir.join(&self.log_file_name);
+		let mut log_file = match fs::OpenOptions::new() 
+											.append(true)
+											.open(&logpath) {
+			Ok(file) => file,
+			Err(why) => match why.kind() {
+				io::ErrorKind::NotFound => match File::create(&logpath) {
+					Ok(file) => file,
+					Err(why) => return Err(why),
+				},
+				_ => return Err(why),
+			},
+		};
+		match writeln!(log_file,"{}",&logstring) {
+			Ok(_) => return Ok(()),
+			Err(why) => return Err(why),
+		};
+	}
+
+	fn log(&self,logstring:&str) {
+		let log_file_name:String = self.log_file_name.clone();
+		match self.log_to_file(&logstring) {
+			Err(why) => {
+				eprintln!("ERROR: Failed to write to log file at {}: {}",&log_file_name,why);
+			},
+			Ok(()) => (),
+		};
+	}
+
+}
 
 fn main() {
 	// use Clap to obtain command-line arguments
@@ -26,6 +86,9 @@ fn main() {
 			process::exit(1);
 		},
 		Ok(n) => n,
+	};
+	let logger:Logger = Logger {
+		log_file_name:format!("{}-teamech-server.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()),
 	};
 	let pad_path:&str = arguments.value_of("PADFILE").unwrap_or("");
 	let server_name:&str = arguments.value_of("name").unwrap_or("server");
@@ -63,7 +126,9 @@ fn main() {
 				Ok(_) => (),
 			};
 			while let Some(event) = server.event_log.pop_front() {
-				println!("{}",event.to_string());
+				let event_string:String = event.to_string();
+				println!("{}",event_string);
+				logger.log(&event_string);
 			}
 		}
 	}

@@ -1,4 +1,4 @@
-// Teamech v 0.8.1 October 2018
+// Teamech v 0.8.2 October 2018
 // License: AGPL v3
 
 /*
@@ -375,96 +375,100 @@ impl Event {
 		let timestamp:String = format!("{}",self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
 		match self.class {
 			EventClass::Acknowledge => {
-				return format!("[{}] Acknowledgement of [{}] by {} [{}]",timestamp,&self.contents,&self.identifier,self.address);
+				return format!("[{}] Acknowledgement of [{}] by {} [{}]",&timestamp,&self.contents,&self.identifier,&self.address);
 			},
 			EventClass::Create => {
-				return format!("[{}] Initialization complete.",timestamp);
+				return format!("[{}] Initialization complete.",&timestamp);
 			},
 			EventClass::ServerSubscribe => {
-				return format!("[{}] Subscription requested by {} [{}] - {}",timestamp,&self.identifier,self.address,&self.parameter);
+				return format!("[{}] Subscription requested by {} [{}] - {}",&timestamp,&self.identifier,&self.address,&self.parameter);
 			},
 			EventClass::ServerUnsubscribe => {
-				return format!("[{}] Subscription closed by {} [{}]",timestamp,&self.identifier,self.address);
+				return format!("[{}] Subscription closed by {} [{}]",&timestamp,&self.identifier,&self.address);
 			},
 			EventClass::ClientSubscribe => {
-				return format!("[{}] Subscribed to [{}]",timestamp,self.address);
+				return format!("[{}] Subscribed to [{}]",&timestamp,&self.address);
 			},
 			EventClass::ClientUnsubscribe => {
-				return format!("[{}] Unsubscribed from [{}]",timestamp,self.address);
+				return format!("[{}] Unsubscribed from [{}]",&timestamp,&self.address);
 			},
 			EventClass::ServerLink => {
-				return format!("[{}] Linked to server at [{}]",timestamp,&self.contents);
+				return format!("[{}] Linked to server at [{}]",&timestamp,&self.contents);
 			},
 			EventClass::ServerLinkFailure => {
-				return format!("[{}] Could not link to server at [{}]: {}",timestamp,&self.contents,&self.parameter);
+				return format!("[{}] Could not link to server at [{}]: {}",&timestamp,&self.contents,&self.parameter);
 			},
 			EventClass::ServerUnlink => {
-				return format!("[{}] Unlinked from server at [{}]",timestamp,&self.contents);
+				return format!("[{}] Unlinked from server at [{}]",&timestamp,&self.contents);
 			},
 			EventClass::ReceiveMessage => {
-				return format!("[{}] [RECEIVE] {} [{}] -> [{}] {}",timestamp,&self.identifier,self.address,&self.parameter,&self.contents);
+				return format!("[{}] {} [{}]: [{}] {}",&timestamp,&self.identifier,&self.address,&self.parameter,&self.contents);
 			},
 			EventClass::ReceiveFailure => {
-				return format!("[{}] Could not receive packet: {}",timestamp,&self.contents);
+				return format!("[{}] Could not receive packet: {}",&timestamp,&self.contents);
 			},
 			EventClass::SendMessage => {
-				return format!("[{}] [SEND] [{}] {}",timestamp,&self.parameter,self.contents);
+				if &self.parameter == ">" {
+					return format!("[{}] (local) [global]: {}",&timestamp,&self.contents);
+				} else {
+					return format!("[{}] (local) [{}]: {}",&timestamp,&self.parameter,&self.contents);
+				}
 			},
 			EventClass::SendFailure => {
-				return format!("[{}] Could not send packet to {} [{}]: {}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] Could not send packet to {} [{}]: {}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::DeadEndMessage => {
-				return format!("[{}] Not relayed (no matching recipients): [{}] {}",timestamp,&self.parameter,&self.contents);
+				return format!("[{}] Not relayed (no matching recipients) [{}]: {}",&timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::HaltedMessage => {
-				return format!("[{}] Not relayed (returning packet): [{}] {}",timestamp,&self.parameter,&self.contents);
+				return format!("[{}] Not relayed (returning packet) [{}]: {}",&timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::TestMessage => {
-				return format!("[{}] Match test: [{}] [matches {}]",timestamp,&self.parameter,&self.contents);
+				return format!("[{}] Match test: [{}] [matches {}]",&timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::RoutedMessage => {
-				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",timestamp,&self.parameter,&self.contents,&self.identifier,self.address);
+				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
 			},
 			EventClass::GlobalMessage => {
-				return format!("[{}] [GLOBAL] [{}] {} -> [all clients]",timestamp,&self.parameter,&self.contents);
+				return format!("[{}] [GLOBAL] {} -> [all clients]",&timestamp,&self.contents);
 			},
 			EventClass::InvalidMessage => {
-				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> [{}] {}",timestamp,&self.identifier,self.address,&self.parameter,&self.contents);
+				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> [{}] {}",&timestamp,&self.identifier,&self.address,&self.parameter,&self.contents);
 			},
 			EventClass::DeliveryRetry => {
 				return format!("[{}] [resending] [{}] {} -> {} [{}]",
-					timestamp,&self.parameter,&self.contents,&self.identifier,self.address);
+					&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
 			},
 			EventClass::DeliveryFailure => {
-				return format!("[{}] [delivery failed] [{}] {} -> {} [{}]",timestamp,&self.parameter,&self.contents,&self.identifier,self.address);
+				return format!("[{}] [delivery failed] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
 			},
 			EventClass::NameUpdate => {
-				return format!("[{}] {} [{}] set name to @{}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] {} [{}] set name to @{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::NameUpdateFailure => {
-				return format!("[{}] {} [{}] could not set name to @{}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] {} [{}] could not set name to @{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::ClassAdd => {
-				return format!("[{}] {} [{}] added class #{}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] {} [{}] added class #{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::ClassAddFailure => {
 				return format!("[{}] {} [{}] could not add class #{}",
-					timestamp,&self.identifier,self.address,&self.contents);
+					&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::ClassRemove => {
-				return format!("[{}] {} [{}] deleted class #{}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] {} [{}] deleted class #{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::ClassListRequest => {
-				return format!("[{}] {} [{}] requested class list.",timestamp,&self.identifier,self.address);
+				return format!("[{}] {} [{}] requested class list.",&timestamp,&self.identifier,&self.address);
 			},
 			EventClass::ClassListResponse => {
-				return format!("[{}] class list for {} [{}]: #{}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] class list for {} [{}]: #{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::ClientListRequest => {
-				return format!("[{}] {} [{}] requested client list.",timestamp,&self.identifier,self.address);
+				return format!("[{}] {} [{}] requested client list.",&timestamp,&self.identifier,&self.address);
 			},
 			EventClass::ClientListResponse => {
-				return format!("[{}] client list for {} [{}]: #{}",timestamp,&self.identifier,self.address,&self.contents);
+				return format!("[{}] client list for {} [{}]: #{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			_ => return String::new(),
 		};
@@ -681,8 +685,8 @@ impl Client {
 								class:EventClass::HaltedMessage,
 								identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 								address:format!("{}",&source_address),
-								parameter:String::new(),
-								contents:bytes_to_hex(&packet_hash.to_vec()),
+								parameter:bytes_to_hex(&packet_hash.to_vec()),
+								contents:String::from_utf8_lossy(&received_packet.payload).to_string(),
 								timestamp:Local::now(),
 							});
 							return Ok(());
@@ -2038,7 +2042,7 @@ impl Server {
 				class:EventClass::DeadEndMessage,
 				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:String::from_utf8_lossy(&packet.parameter).to_string(),
+				parameter:bytes_to_hex(&packet_hash.to_vec()),
 				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
@@ -2047,7 +2051,7 @@ impl Server {
 				class:EventClass::GlobalMessage,
 				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:format!("{}",&packet.source),
-				parameter:String::from_utf8_lossy(&packet.parameter).to_string(),
+				parameter:bytes_to_hex(&packet_hash.to_vec()),
 				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});

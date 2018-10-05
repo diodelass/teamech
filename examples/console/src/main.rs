@@ -1,5 +1,5 @@
-static VERSION:&str = "0.8.1 October 2018";
-static LOG_DIRECTORY:&str = ".teamech-logs/desktop";
+static VERSION:&str = "0.8.2 October 2018";
+static LOG_DIRECTORY:&str = ".teamech-logs/console";
 static PROMPT:&str = "[teamech]~ ";
 static BAR:char = '-';
 
@@ -231,13 +231,12 @@ impl WindowLogger {
 	}
 
 	fn handle_keys(&mut self) {
-		let page_position_snapshot:usize = self.page_position.clone();
 		match self.window.getch() { 
 			Some(Input::Character(c)) => match c {
 				'\x0A' => { // ENTER
 					if self.page_position > 0 {
 						self.page_position = 0;
-						self.page(&page_position_snapshot);
+						self.page(&0);
 					}
 					self.history_position = 0;
 					if self.line_history.len() == 0 || self.line_history[self.line_history.len()-1] != self.console_line {
@@ -369,24 +368,60 @@ impl WindowLogger {
 				self.window.refresh();
 			},
 			Some(Input::KeyResize) => {
+				let page_position_snapshot:usize = self.page_position;
 				self.page(&page_position_snapshot);
 				for ch in self.console_line.iter() {
 					self.window.addch(*ch);
 				}
-			}
-			Some(Input::KeyPPage) => {
+			},
+			Some(Input::KeyPPage)|Some(Input::KeySPrevious) => {
+				if self.page_position < self.history.len()-10 {
+					self.page_position += 10;
+					let page_position_snapshot:usize = self.page_position;
+					self.page(&page_position_snapshot);
+					for ch in self.console_line.iter() {
+						self.window.addch(*ch);
+					}
+				} else {
+					self.page_position = self.history.len();
+					let page_position_snapshot:usize = self.page_position;
+					self.page(&page_position_snapshot);
+					for ch in self.console_line.iter() {
+						self.window.addch(*ch);
+					}
+				}
+			},
+			Some(Input::KeyNPage)|Some(Input::KeySNext) => {
+				if self.page_position > 10 {
+					self.page_position -= 10;
+					let page_position_snapshot:usize = self.page_position;
+					self.page(&page_position_snapshot);
+					for ch in self.console_line.iter() {
+						self.window.addch(*ch);
+					}
+				} else {
+					self.page_position = 0;
+					self.page(&0);
+					for ch in self.console_line.iter() {
+						self.window.addch(*ch);
+					}
+				}
+			},
+			Some(Input::KeySR) => { // Shift-Up
 				if self.page_position < self.history.len() {
 					self.page_position += 1;
-					self.page(&(page_position_snapshot+1));
+					let page_position_snapshot:usize = self.page_position;
+					self.page(&page_position_snapshot);
 					for ch in self.console_line.iter() {
 						self.window.addch(*ch);
 					}
 				}
 			}
-			Some(Input::KeyNPage) => {
+			Some(Input::KeySF) => { // Shift-Down
 				if self.page_position > 0 {
 					self.page_position -= 1;
-					self.page(&(page_position_snapshot-1));
+					let page_position_snapshot:usize = self.page_position;
+					self.page(&page_position_snapshot);
 					for ch in self.console_line.iter() {
 						self.window.addch(*ch);
 					}
@@ -416,7 +451,7 @@ fn main() {
 	let client_class:&str = arguments.value_of("class").unwrap_or("supervisor");
 	'recovery:loop {
 		set_var("ESCDELAY","0"); // force ESCDELAY to be 0, so we can quit the application with the ESC key without the default 1-second delay.
-		let log_file_name:String = format!("{}-teamech-desktop.log",Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+		let log_file_name:String = format!("{}-teamech-console.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 		let mut window_logger = new_windowlogger(&log_file_name);
 		start_color();
 		use_default_colors();

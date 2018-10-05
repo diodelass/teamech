@@ -1,6 +1,6 @@
 [package]
 name = "teamech"
-version = "0.8.1"
+version = "0.8.2"
 authors = ["Ellie D. <sporillium@gmail.com>"]
 
 [dependencies]

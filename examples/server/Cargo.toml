@@ -1,8 +1,10 @@
 [package]
 name = "teamech-server"
-version = "0.8.1"
+version = "0.8.2"
 authors = ["Ellie D. <sporillium@gmail.com>"]
 
 [dependencies]
 teamech = { path = "../.." }
 clap = "2"
+dirs = "1"
+chrono = "0.4"
