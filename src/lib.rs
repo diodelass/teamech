@@ -1161,6 +1161,7 @@ pub struct Server {
 	pub name:String,
 	pub socket:UdpSocket,
 	pub subscribers:HashMap<SocketAddr,Subscription>,
+	pub linked_servers:HashMap<SocketAddr,Subscription>,
 	pub max_subscribers:usize,
 	pub ban_points:HashMap<IpAddr,u64>,
 	pub max_ban_points:u64,
@@ -1191,6 +1192,7 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 				name:name.to_owned(),
 				socket:socket,
 				subscribers:HashMap::new(),
+				linked_servers:HashMap::new(),
 				max_subscribers:1024,
 				ban_points:HashMap::new(),
 				max_ban_points:10,
@@ -1435,7 +1437,7 @@ impl Server {
 			},
 			Ok(_) => (),
 		};
-		self.subscribers.insert(remote_address.clone(),Subscription {
+		self.linked_servers.insert(remote_address.clone(),Subscription {
 			address:remote_address.clone(),
 			name:String::new(),
 			classes:vec![String::from("server")],
@@ -1546,6 +1548,26 @@ impl Server {
 			Ok(_) => return Ok(()),
 		};
 	}
+	
+	// re-sorts the subscribers into clients and servers, based on which class is which.
+	pub fn re_sort_subs(&mut self) {
+		let mut entries:Vec<(SocketAddr,Subscription)> = Vec::new();
+		for sub in self.subscribers.clone().into_iter() {
+			entries.push(sub);
+		}
+		self.subscribers.clear();
+		for server in self.linked_servers.clone().into_iter() {
+			entries.push(server);
+		}
+		self.linked_servers.clear();
+		for entry in entries.into_iter() {
+			if entry.1.classes.contains(&String::from("server")) {
+				self.linked_servers.insert(entry.0,entry.1);
+			} else {
+				self.subscribers.insert(entry.0,entry.1);
+			}
+		}
+	}
 
 	pub fn get_packets(&mut self) -> Result<(),io::Error> {
 		let server_name:String = self.name.clone();
@@ -1585,7 +1607,7 @@ impl Server {
 						continue;
 					}
 					let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
-					if !self.subscribers.contains_key(&source_address) {
+					if !self.subscribers.contains_key(&source_address) && !self.linked_servers.contains_key(&source_address) {
 						if received_packet.valid && self.subscribers.len() < self.max_subscribers {
 							self.subscribers.insert(source_address.clone(),Subscription {
 								address:source_address.clone(),
@@ -1740,6 +1762,11 @@ impl Server {
 											sub.classes.push(new_class.clone());
 										}
 									}
+									if let Some(mut sub) = self.linked_servers.get_mut(&source_address) {
+										if !sub.classes.contains(&new_class) {
+											sub.classes.push(new_class.clone());
+										}
+									}
 									match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
 										&vec![0x06],&vec![],&source_address) {
 										Err(why) => return Err(why),
@@ -1753,6 +1780,7 @@ impl Server {
 										contents:new_class.to_owned(),
 										timestamp:Local::now(),
 									});
+									self.re_sort_subs();
 								} else {
 									match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
 										&vec![0x15],&vec![],&source_address) {
@@ -1778,6 +1806,13 @@ impl Server {
 										}
 									}
 								}
+								if let Some(mut sub) = self.linked_servers.get_mut(&source_address) {
+									for n in (0..sub.classes.len()).rev() {
+										if sub.classes[n] == deleted_class {
+											sub.classes.remove(n);
+										}
+									}
+								}
 								match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
 									&vec![0x06],&vec![],&source_address) {
 									Err(why) => return Err(why),
@@ -1791,6 +1826,7 @@ impl Server {
 									contents:deleted_class.to_owned(),
 									timestamp:Local::now(),
 								});
+								self.re_sort_subs();
 							},
 							(0x13,0) => {
 								if let Some(mut sub) = self.subscribers.clone().get(&source_address) {
@@ -1957,6 +1993,24 @@ impl Server {
 		}
 		let send:bool = packet.payload.len() > 0;
 		let mut number_matched:u64 = 0;
+		for server in self.linked_servers.clone().iter_mut() {
+			if &packet.source != server.0 && packet.parameter.len() >= 1 && packet.parameter[0] == b'>' {
+				match self.send_raw(&packet.raw,&server.0) {
+					Err(why) => return Err(why),
+					Ok(_) => (),
+				};
+				if packet.parameter.len() > 1 {
+					self.event_log.push_back(Event {
+						class:EventClass::RoutedMessage,
+						identifier:format!("@{}/#server",server.1.name),
+						address:format!("{}",&server.0),
+						parameter:bytes_to_hex(&packet_hash.to_vec()),
+						contents:String::from_utf8_lossy(&packet.payload).to_string(),
+						timestamp:Local::now(),
+					});
+				}
+			}
+		}
 		for sub in self.subscribers.clone().iter_mut() {
 			let mut subscriber_identifiers:String = String::new();
 			subscriber_identifiers.push_str(&format!("@{} ",&sub.1.name));
