@@ -1,4 +1,4 @@
-// Teamech v 0.8.2 October 2018
+// Teamech v 0.8.3 October 2018
 // License: AGPL v3
 
 /*
@@ -375,13 +375,15 @@ impl Event {
 		let timestamp:String = format!("{}",self.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"));
 		match self.class {
 			EventClass::Acknowledge => {
-				return format!("[{}] Acknowledgement of [{}] by {} [{}]",&timestamp,&self.contents,&self.identifier,&self.address);
+				return format!("[{}] Acknowledgement of [{}] by {} [{}]",&timestamp,&self.contents,&self.identifier,
+					&self.address);
 			},
 			EventClass::Create => {
 				return format!("[{}] Initialization complete.",&timestamp);
 			},
 			EventClass::ServerSubscribe => {
-				return format!("[{}] Subscription requested by {} [{}] - {}",&timestamp,&self.identifier,&self.address,&self.parameter);
+				return format!("[{}] Subscription requested by {} [{}] - {}",&timestamp,&self.identifier,&self.address,
+					&self.parameter);
 			},
 			EventClass::ServerUnsubscribe => {
 				return format!("[{}] Subscription closed by {} [{}]",&timestamp,&self.identifier,&self.address);
@@ -415,7 +417,8 @@ impl Event {
 				}
 			},
 			EventClass::SendFailure => {
-				return format!("[{}] Could not send packet to {} [{}]: {}",&timestamp,&self.identifier,&self.address,&self.contents);
+				return format!("[{}] Could not send packet to {} [{}]: {}",&timestamp,&self.identifier,&self.address,
+					&self.contents);
 			},
 			EventClass::DeadEndMessage => {
 				return format!("[{}] Not relayed (no matching recipients) [{}]: {}",&timestamp,&self.parameter,&self.contents);
@@ -427,20 +430,23 @@ impl Event {
 				return format!("[{}] Match test: [{}] [matches {}]",&timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::RoutedMessage => {
-				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
+				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,
+					&self.address);
 			},
 			EventClass::GlobalMessage => {
 				return format!("[{}] [GLOBAL] {} -> [all clients]",&timestamp,&self.contents);
 			},
 			EventClass::InvalidMessage => {
-				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> [{}] {}",&timestamp,&self.identifier,&self.address,&self.parameter,&self.contents);
+				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> [{}] {}",&timestamp,&self.identifier,&self.address,
+					&self.parameter,&self.contents);
 			},
 			EventClass::DeliveryRetry => {
 				return format!("[{}] [resending] [{}] {} -> {} [{}]",
 					&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
 			},
 			EventClass::DeliveryFailure => {
-				return format!("[{}] [delivery failed] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
+				return format!("[{}] [delivery failed] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,
+					&self.identifier,&self.address);
 			},
 			EventClass::NameUpdate => {
 				return format!("[{}] {} [{}] set name to @{}",&timestamp,&self.identifier,&self.address,&self.contents);
@@ -505,6 +511,7 @@ pub struct UnackedPacket {
 	pub decrypted:Vec<u8>,			// raw decrypted data, not including timestamp, signature, or nonce
 	pub timestamp:i64,					// when packet was last sent
 	pub tries:u64,							// number of times this packet has had sending attempted
+	pub source:SocketAddr,			// sender's socket address
 	pub destination:SocketAddr,	// recipient socket address
 	pub recipient:Vec<u8>,			// recipient's declared identifier (@name/#class)
 	pub parameter:Vec<u8>,			// message parameter (e.g. routing expression)
@@ -513,21 +520,22 @@ pub struct UnackedPacket {
 
 // object representing a Teamech client, with methods for sending and receiving packets.
 pub struct Client {
-	pub socket:UdpSocket,																		// local socket for transceiving data
-	pub server_address:SocketAddr,													// address of server we're subscribed to
-	pub name:String,																				// our self-declared name
-	pub classes:Vec<String>,																// our self-declared classes
-	pub crypt:Crypt,																				// crypt object holding key data
-	pub receive_queue:VecDeque<Packet>,											// incoming packets that need to be processed by the implementation
-	pub subscribed:bool,																		// are we subscribed?
-	pub event_log:VecDeque<Event>,													// log of events produced by the client
-	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
-	pub recent_packets:VecDeque<[u8;8]>,										// hashes of packets that were recently seen, to merge double-sends
-	pub max_recent_packets:usize,														// max number of recent packet hashes to store
-	pub max_resend_tries:u64,																// maximum number of tries to resend a packet before discarding it
-	pub uptime:i64,																					// time at which this client was created
-	pub time_tolerance_ms:i64,															// maximum time difference a packet can have from now and still be considered valid
-	pub synchronous:bool,																		// whether or not this client is synchronous
+	pub socket:UdpSocket,																// local socket for transceiving data
+	pub server_address:SocketAddr,											// address of server we're subscribed to
+	pub name:String,																		// our self-declared name
+	pub classes:Vec<String>,														// our self-declared classes
+	pub crypt:Crypt,																		// crypt object holding key data
+	pub receive_queue:VecDeque<Packet>,									// incoming packets that need to be processed by the implementation
+	pub subscribed:bool,																// are we subscribed?
+	pub event_log:VecDeque<Event>,											// log of events produced by the client
+	pub last_number_matched:([u8;8],u64),								// tracks ack match-count reporting
+	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,	// packets that need to be resent if they aren't acknowledged
+	pub recent_packets:VecDeque<[u8;8]>,								// hashes of packets that were recently seen, to merge double-sends
+	pub max_recent_packets:usize,												// max number of recent packet hashes to store
+	pub max_resend_tries:u64,														// maximum number of tries to resend a packet before discarding it
+	pub uptime:i64,																			// time at which this client was created
+	pub time_tolerance_ms:i64,													// maximum time difference a packet can have from now
+	pub synchronous:bool,																// whether or not this client is synchronous
 }
 
 // client constructor, which takes a pad file path, a server address, and a local port
@@ -551,6 +559,7 @@ pub fn new_client(pad_path:&str,string_address:&str,local_port:u16) -> Result<Cl
 				classes:Vec::new(),
 				receive_queue:VecDeque::new(),
 				event_log:VecDeque::new(),
+				last_number_matched:([0;8],0),
 				subscribed:false,
 				unacked_packets:HashMap::new(),
 				recent_packets:VecDeque::new(),
@@ -699,6 +708,11 @@ impl Client {
 									acked_hash.copy_from_slice(&received_packet.payload[..8]);
 									number_matched_bytes.copy_from_slice(&received_packet.payload[8..]);
 									let number_matched:u64 = bytes_to_u64(&number_matched_bytes);
+									if self.last_number_matched.0 == acked_hash {
+										self.last_number_matched = (acked_hash.clone(),self.last_number_matched.1+number_matched);
+									} else {
+										self.last_number_matched = (acked_hash.clone(),number_matched);
+									}
 									let _ = self.unacked_packets.remove(&acked_hash);
 									self.event_log.push_back(Event {
 										class:EventClass::TestResponse,
@@ -853,6 +867,7 @@ impl Client {
 				decrypted:payload.clone(),
 				timestamp:Local::now().timestamp_millis(),
 				tries:0,
+				source:self.server_address.clone(),
 				destination:self.server_address.clone(),
 				recipient:b"server".to_vec(),
 				parameter:parameter.clone(),
@@ -1153,7 +1168,7 @@ pub struct Subscription {
 	pub classes:Vec<String>,																// subscriber's self-declared classes
 	pub uptime:i64,																					// time at which this subscription was created
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
-	pub delivery_failures:u64,															// number of times a packet delivery has failed for this subscriber
+	pub delivery_failures:u64,															// number of times a packet delivery has failed
 }
 
 // server object for holding server parameters and subscriptions.
@@ -1368,7 +1383,7 @@ impl Server {
 		match self.get_response(&vec![0x02,0x06],&remote_address) {
 			Err(why) => {
 				self.event_log.push_back(Event {
-					class:EventClass::ClassAddFailure,
+					class:EventClass::ServerLinkFailure,
 					identifier:String::from("server"),
 					address:String::from("local"),
 					parameter:String::new(),
@@ -1517,11 +1532,12 @@ impl Server {
 			sha3.update(&bottle);
 			sha3.finalize(&mut packet_hash);
 			if let Some(sub) = self.subscribers.get_mut(&address) {
-				sub.unacked_packets.insert(packet_hash.clone(),UnackedPacket{
+				sub.unacked_packets.insert(packet_hash.clone(),UnackedPacket {
 					raw:bottle.clone(),
 					decrypted:message.clone(),
 					timestamp:Local::now().timestamp_millis(),
 					tries:0,
+					source:address.clone(),
 					destination:address.clone(),
 					recipient:recipient.as_bytes().to_vec(),
 					parameter:parameter.clone(),
@@ -1657,11 +1673,25 @@ impl Server {
 					}
 					if received_packet.parameter.len() > 0 {
 						match (received_packet.parameter[0],received_packet.payload.len()) {
-							(0x06,8) => {
+							(0x06,8)|(0x06,16)|(0x03,16) => {
 								let mut acked_hash:[u8;8] = [0;8];
 								acked_hash.copy_from_slice(&received_packet.payload[..]);
+								let mut ack_origin:Option<SocketAddr> = None;
 								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-									let _ = sub.unacked_packets.remove(&acked_hash);
+									match sub.unacked_packets.remove(&acked_hash) {
+										None => (),
+										Some(packet) => {
+											ack_origin = Some(packet.source.clone());
+										},
+									};
+								}
+								if received_packet.payload.len() == 16 {
+									if let Some(origin) = ack_origin {
+										match self.send_raw(&received_packet.raw,&origin) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+									}
 								}
 								self.event_log.push_back(Event {
 									class:EventClass::Acknowledge,
@@ -2058,6 +2088,7 @@ impl Server {
 							decrypted:packet.payload.clone(),
 							timestamp:Local::now().timestamp_millis(),
 							tries:0,
+							source:packet.source.clone(),
 							destination:listed_sub.address.clone(),
 							recipient:recipient.as_bytes().to_vec(),
 							parameter:packet.parameter.clone(),

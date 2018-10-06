@@ -1,4 +1,4 @@
-static VERSION:&str = "0.8.2 October 2018";
+static VERSION:&str = "0.8.3 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/console";
 static PROMPT:&str = "[teamech]~ ";
 static BAR:char = '-';
@@ -450,7 +450,7 @@ fn main() {
 	let client_name:&str = arguments.value_of("name").unwrap_or("human");
 	let client_class:&str = arguments.value_of("class").unwrap_or("supervisor");
 	'recovery:loop {
-		set_var("ESCDELAY","0"); // force ESCDELAY to be 0, so we can quit the application with the ESC key without the default 1-second delay.
+		set_var("ESCDELAY","0"); // force ESCDELAY to be 0, so we can quit the application with the ESC key without delay.
 		let log_file_name:String = format!("{}-teamech-console.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 		let mut window_logger = new_windowlogger(&log_file_name);
 		start_color();
@@ -485,7 +485,7 @@ fn main() {
 		let _ = client.set_asynchronous(10);
 		match window_logger.log_to_file(&format!("Opened log file."),Local::now()) {
 			Err(why) => {
-				window_logger.print(&format!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED - you should fix this!",
+				window_logger.print(&format!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED!",
 					&log_file_name,why));
 			},
 			Ok(_) => (),
