@@ -1,4 +1,4 @@
-// Teamech v 0.8.3 October 2018
+// Teamech v 0.8.5 October 2018
 // License: AGPL v3
 
 /*
@@ -6,7 +6,18 @@ Feature Outline
 
 Functionality														Implemented
 
-I. Server																		
+I. Network
+	A. UDP																		[ ]
+		1. Sending															[X]
+		2. Receiving														[X]
+		3. WAN Links/Holepunching								[ ]
+	B. TCP																		[ ]
+		1. Connection bootstrapping							[ ]
+	C. Addresses															[ ]
+		1. IPv4																	[ ]
+		2. IPv6																	[X]
+		3. DNS resolution												[ ]
+II. Server																		
 	A. Subscriptions													[X]
 		1. Acceptance														[X]
 		2. Cancellation													[X]
@@ -30,19 +41,19 @@ I. Server
 	C. Server-Server Links										[X]
 		1. Opening															[X] 
 		2. Closing															[X]
-II. Client																	
+III. Client																	
 	A. Subscribing														[X]
 		1. Opening subscription									[X]
 		2. Closing subscription									[X]
 		3. Responding to closure								[X]
 	B. Sending																[X]
 	C. Receiving															[X]
-III. Security																[X]
+IV. Security																[X]
 	A. Encryption															[X]
 	B. Decryption															[X]
 	C. Validation															[X]
 	D. Incident Logs													[X]
-IV. Logging																	[X]
+V. Logging																	[X]
 	A. Log Events															[X]
 	B. Log Event Classification								[X]
 
@@ -59,6 +70,8 @@ use chrono::prelude::*;
 extern crate byteorder;
 use byteorder::{LittleEndian,ReadBytesExt,WriteBytesExt};
 
+extern crate resolve;
+
 use std::io::prelude::*;
 use std::io;
 use std::fs::File;
@@ -66,7 +79,6 @@ use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
 use std::thread::sleep;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
-use std::str::FromStr;
 
 // converts a signed 64-bit int into eight bytes
 fn i64_to_bytes(number:&i64) -> [u8;8] {
@@ -541,21 +553,39 @@ pub struct Client {
 
 // client constructor, which takes a pad file path, a server address, and a local port
 // number and produces a new client object. also calls the Crypt constructor.
-pub fn new_client(pad_path:&str,string_address:&str,local_port:u16) -> Result<Client,io::Error> {
-	let server_address:SocketAddr = match SocketAddr::from_str(&string_address) {
-		Err(_why) => return Err(io::Error::new(io::ErrorKind::InvalidData,"could not parse argument as a socket address")),
-		Ok(addr) => addr,
+pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u16) -> Result<Client,io::Error> {
+	let mut resolv_config = match resolve::config::DnsConfig::load_default() {
+		Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not get DNS configuration")),
+		Ok(config) => config,
 	};
+	resolv_config.use_inet6 = true;
+	let resolver = match resolve::resolver::DnsResolver::new(resolv_config) {
+		Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not initialize DNS resolver")),
+		Ok(resolver) => resolver,
+	};
+	let server_ip_address:IpAddr = match resolver.resolve_host(&string_address) {
+		Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"failed to resolve host")),
+		Ok(addrs) => {
+			let addrs_vec:Vec<IpAddr> = addrs.collect();
+			if addrs_vec.len() > 0 {
+				addrs_vec[0]
+			} else {
+				return Err(io::Error::new(io::ErrorKind::NotFound,"failed to resolve host"));
+			}
+		},
+	};
+	let server_socket_address:SocketAddr = SocketAddr::new(server_ip_address,remote_port);
 	let new_crypt:Crypt = match new_crypt(&pad_path) {
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
-	match UdpSocket::bind(&format!("0.0.0.0:{}",local_port)) {
+	match UdpSocket::bind(SocketAddr::new(IpAddr::from([0,0,0,0,0,0,0,1]),local_port)) {
+	//match UdpSocket::bind(SocketAddr::new(IpAddr::from([0,0,0,0]),local_port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let mut created_client = Client {
 				socket:socket,
-				server_address:server_address,
+				server_address:server_socket_address,
 				name:String::new(),
 				classes:Vec::new(),
 				receive_queue:VecDeque::new(),
@@ -1209,7 +1239,7 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
-	match UdpSocket::bind(&format!("0.0.0.0:{}",port)) {
+	match UdpSocket::bind(SocketAddr::new(IpAddr::from([0,0,0,0,0,0,0,1]),port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let mut created_server = Server {

@@ -108,17 +108,20 @@ a 10-megabyte pad:
 `dd if=/dev/urandom of=teamech-october-2018.pad bs=1M count=10 status=progress`  
 You should then copy this pad file to the server and all clients, and select it as the pad file to
 use at the command line.  
-I make absolutely no guaratees about the security of any Teamech network, no matter what key size 
+I make absolutely no guarantees about the security of any Teamech network, no matter what key size 
 and key life cycle practices you adhere to. This software is a personal project to familiarize myself
 with cryptography, network programming, and version control, and you shouldn't trust it in any context.
 Teamech's security is best thought of as similar to that of unencrypted data being transmitted over
 a long cable - it's probably safe, but only provided that no one is seriously interested in it.
-  
+
 ### Mobile Support
 Smartphone-based clients are not planned for any of the Teamech reference implementations. However, there
 is no reason that one couldn't be written, so I may eventually attempt to write an Android app depending 
 on how useful this project becomes. I don't plan to ever write an iOS app, since I have no desire to
-purchase any Apple hardware or to send anything through Apple's approval process.
+purchase any Apple hardware or to send anything through Apple's approval process.  
+Due to the vulnerability of the Teamech system to insider attacks, the use of smartphone-based clients
+is liable to seriously compromise the security of Teamech networks as a result of the heavily-monitored
+nature of smartphones. This may be considered an acceptable risk by some, but it bears mentioning.
 
 ### Origin of Name
 The name "Teamech" comes from a naïve and silly mishearing of a voice line from Overwatch, when

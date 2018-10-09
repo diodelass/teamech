@@ -1,4 +1,4 @@
-static VERSION:&str = "0.8.4 October 2018";
+static VERSION:&str = "0.8.5 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/console";
 static PROMPT:&str = "[teamech]~ ";
 static BAR:char = '-';
@@ -297,9 +297,11 @@ impl WindowLogger {
 			Some(Input::KeyBackspace) => {
 				if self.line_position > 0 {
 					let _ = self.console_line.remove(self.line_position-1); 
+					self.line_position -= 1;
+				}	
+				while ((self.line_position+PROMPT.len()) as i32) < self.window.get_cur_x() {
 					self.window.mv(self.window.get_cur_y(),self.window.get_cur_x()-1);
 					self.window.delch();
-					self.line_position -= 1;
 					self.window.refresh();
 				}
 			}
@@ -446,6 +448,7 @@ fn main() {
 		(author: "Ellie D.")
 		(about: "Desktop console client for the Teamech protocol.")
 		(@arg ADDRESS: +required "Remote address to contact.")
+		(@arg PORT: +required "Remote port on which to contact the server.")
 		(@arg PADFILE: +required "Pad file to use for encryption/decryption (must be same as server's).")
 		(@arg name: -n --name +takes_value "Unique identifier to present to the server for routing.")
 		(@arg class: -c --class +takes_value "Non-unique identifier to present to the server for routing.")
@@ -477,7 +480,8 @@ fn main() {
 		window_logger.print("Initializing client...");
 		let mut client = match teamech::new_client(
 			&arguments.value_of("PADFILE").unwrap_or(""), 
-			&arguments.value_of("ADDRESS").unwrap_or(""), 
+			&arguments.value_of("ADDRESS").unwrap_or(""),
+			arguments.value_of("PORT").unwrap_or("6666").parse::<u16>().unwrap_or(6666),
 			arguments.value_of("localport").unwrap_or("0").parse::<u16>().unwrap_or(0)) {
 			Err(why) => {
 				endwin();
@@ -497,7 +501,7 @@ fn main() {
 			Ok(_) => (),
 		};
 		'authtry:loop {
-			window_logger.log(&format!("Trying to contact server..."));
+			window_logger.log(&format!("Trying to contact server at {}...",&client.server_address));
 			match client.subscribe() {
 				Err(why) => {
 					window_logger.log(&format!("Failed to subscribe to server - {}.",why));

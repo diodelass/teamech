@@ -1,11 +1,11 @@
 [package]
 name = "teamech-console"
-version = "0.8.4"
+version = "0.8.5"
 authors = ["Ellie D. <sporillium@gmail.com>"]
 
 [dependencies]
 teamech = { path = "../.." }
 clap = "2"
-pancurses = "0.16"
+pancurses = { version = "0.16", features = ["wide"] }
 dirs = "1.0.3"
 chrono = "0.4"

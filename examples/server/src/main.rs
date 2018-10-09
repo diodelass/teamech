@@ -1,4 +1,4 @@
-static VERSION:&str = "0.8.4 October 2018";
+static VERSION:&str = "0.8.5 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/server/";
 
 extern crate teamech;
