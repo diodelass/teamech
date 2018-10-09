@@ -38,6 +38,7 @@ struct WindowLogger {
 	page_position:usize,
 	line_position:usize,
 	local_lines:VecDeque<Vec<u8>>,
+	sent_lines:VecDeque<(String,usize)>,
 }
 
 fn new_windowlogger(log_file_name:&str) -> WindowLogger {
@@ -51,6 +52,7 @@ fn new_windowlogger(log_file_name:&str) -> WindowLogger {
 		page_position:0,
 		line_position:0,
 		local_lines:VecDeque::new(),
+		sent_lines:VecDeque::new(),
 	};
 }
 
@@ -94,13 +96,16 @@ impl WindowLogger {
 		self.window.refresh();
 	}
 
-	fn print_left(&mut self,line:&str) {
-		if let Some(mut history_entry) = self.history.pop() {
-			history_entry.1 = line.to_owned();
-			self.history.push(history_entry);
+	fn print_left(&mut self,line:&str,position:usize) {
+		if self.history.len() > position {
+			self.history[position].1 = line.to_owned();
 		}
-		if self.window.get_cur_y() > 0 {
-			self.window.mv(self.window.get_max_y()-3,self.window.get_max_x()-(line.len() as i32)-1);
+		if (position as i32)-(self.history_position as i32) > 0 
+			&& (position as i32)-(self.history_position as i32) < self.window.get_max_y()-2 {
+			self.window.mv(
+				self.window.get_max_y()-3+((position as i32)-(self.history.len() as i32)+1)+(self.history_position as i32),
+				self.window.get_max_x()-(line.len() as i32)-1
+			);
 			self.window.clrtoeol();
 			self.window.addstr(&line);
 			self.window.attrset(Attribute::Normal);
@@ -481,6 +486,7 @@ fn main() {
 			},
 			Ok(client) => client,
 		};
+		client.send_provide_hashes = true;
 		window_logger.print("Client initialized.");
 		let _ = client.set_asynchronous(10);
 		match window_logger.log_to_file(&format!("Opened log file."),Local::now()) {
@@ -534,25 +540,39 @@ fn main() {
 					teamech::EventClass::ClassRemove => (),
 					teamech::EventClass::TestResponse => { 
 						if event.parameter.len() > 0 {
-							window_logger.print_left(&format!("~[ {} ]",&event.parameter));
+							let mut screen_line = 0;
+							for entry in window_logger.sent_lines.iter() {
+								if entry.0 == event.contents {
+									screen_line = entry.1;
+									break;
+								}
+							}
+							window_logger.print_left(&format!("~[ {} ]",&event.parameter),screen_line);
 						}
 					},
 					teamech::EventClass::Acknowledge => { 
+						let mut screen_line = 0;
+						for entry in window_logger.sent_lines.iter() {
+							if entry.0 == event.contents {
+								screen_line = entry.1;
+								break;
+							}
+						}
 						if event.parameter.len() > 0 {
-							window_logger.print_left(&format!(" [ {} ]",&event.parameter));
+							window_logger.print_left(&format!(" [ {} ]",&event.parameter),screen_line);
 						}
 					},
 					teamech::EventClass::ClientSubscribe => {
 						window_logger.log("Subscribed to server.");
 						match client.set_name(&client_name) {
 							Err(why) => {
-								window_logger.log(&format!("Failed to set client name - {}.",why));
+								window_logger.log(&format!("-!- Failed to set client name - {}.",why));
 							},
 							Ok(_) => (),
 						};
 						match client.add_class(&client_class) {
 							Err(why) => {
-								window_logger.log(&format!("Failed to set client class - {}.",why));
+								window_logger.log(&format!("-!- Failed to set client class - {}.",why));
 							},
 							Ok(_) => (),
 						};
@@ -564,7 +584,7 @@ fn main() {
 			while let Some(line) = window_logger.local_lines.pop_front() {
 				if line == b"/quit" {
 					match client.send_packet(&vec![0x18],&vec![]) {
-						Err(why) => window_logger.print(&format!("-!-Failed to send packet - {}.",why)),
+						Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
 						Ok(_) => (),
 					};
 					endwin();
@@ -573,34 +593,39 @@ fn main() {
 				if line.len() > 1 && line[0] == b'`' {
 					if line.len() > 2 {
 						match client.send_packet(&vec![line[1]],&line[2..].to_vec()) {
-							Err(why) => window_logger.print(&format!("-!-Failed to send packet - {}.",why)),
+							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
 							Ok(_) => (),
 						};
 					} else {
 						match client.send_packet(&vec![line[1]],&vec![]) {
-							Err(why) => window_logger.print(&format!("-!-Failed to send packet - {}.",why)),
+							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
 							Ok(_) => (),
 						};
 					}
 				}	
+				let mut packet_hash:String = String::new();
 				if line.len() > 1 && line[0] == b'>' {
 					let messageparts = line.splitn(2,|c| *c == b' ').collect::<Vec<&[u8]>>();
 					if messageparts.len() == 1 {
 						match client.send_packet(&messageparts[0].to_vec(),&vec![]) {
-							Err(why) => window_logger.print(&format!("-!-Failed to send packet - {}.",why)),
-							Ok(_) => (),
+							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
+							Ok(hash) => packet_hash = hash,
 						};
 					} else if messageparts.len() == 2 {
 						match client.send_packet(&messageparts[0].to_vec(),&messageparts[1].to_vec()) {
-							Err(why) => window_logger.print(&format!("-!-Failed to send packet - {}.",why)),
-							Ok(_) => (),
+							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
+							Ok(hash) => packet_hash = hash,
 						};
 					}
 				} else {
 					match client.send_packet(&vec![b'>'],&line) {
-						Err(why) => window_logger.print(&format!("-!-Failed to send packet - {}.",why)),
-						Ok(_) => (),
+						Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
+						Ok(hash) => packet_hash = hash,
 					};
+				}
+				window_logger.sent_lines.push_back((packet_hash,window_logger.history.len()));
+				while window_logger.sent_lines.len() > 64 {
+					let _ = window_logger.sent_lines.pop_front();
 				}
 			}
 			window_logger.window.refresh();

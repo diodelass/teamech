@@ -536,6 +536,7 @@ pub struct Client {
 	pub uptime:i64,																			// time at which this client was created
 	pub time_tolerance_ms:i64,													// maximum time difference a packet can have from now
 	pub synchronous:bool,																// whether or not this client is synchronous
+	pub send_provide_hashes:bool,
 }
 
 // client constructor, which takes a pad file path, a server address, and a local port
@@ -569,6 +570,7 @@ pub fn new_client(pad_path:&str,string_address:&str,local_port:u16) -> Result<Cl
 				uptime:Local::now().timestamp_millis(),
 				time_tolerance_ms:3000,
 				synchronous:true,
+				send_provide_hashes:false,
 			};
 			created_client.event_log.push_back(Event {
 				class:EventClass::Create,
@@ -830,7 +832,7 @@ impl Client {
 	}
 
 	// encrypts and transmits a payload of bytes to the server.
-	pub fn send_packet(&mut self,parameter:&Vec<u8>,payload:&Vec<u8>) -> Result<(),io::Error> {
+	pub fn send_packet(&mut self,parameter:&Vec<u8>,payload:&Vec<u8>) -> Result<String,io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		let mut primary_class:&str = "";
 		if self.classes.len() > 0 {
@@ -881,8 +883,14 @@ impl Client {
 				contents:String::from_utf8_lossy(&payload).to_string(),
 				timestamp:Local::now(),
 			});
+			if self.send_provide_hashes {
+				return Ok(bytes_to_hex(&packet_hash.to_vec()));
+			} else {
+				return Ok(String::new());
+			}
+		} else {
+			return Ok(String::new());
 		}
-		return Ok(());
 	}
 	
 	// transmits a raw vector of bytes without encryption or modification. remember that
@@ -1191,7 +1199,8 @@ pub struct Server {
 	pub receive_queue:VecDeque<Packet>,
 	pub uptime:i64,
 	pub synchronous:bool,
-	pub time_tolerance_ms:i64
+	pub time_tolerance_ms:i64,
+	pub ack_fake_lag_ms:u64,
 }
 
 // server constructor, works very similarly to client constructor
@@ -1223,6 +1232,7 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 				uptime:Local::now().timestamp_millis(),
 				synchronous:true,
 				time_tolerance_ms:3000,
+				ack_fake_lag_ms:0,
 			};
 			created_server.event_log.push_back(Event {
 				class:EventClass::Create,
@@ -1496,7 +1506,7 @@ impl Server {
 
 	// encrypts and transmits a packet, much like the client version.
 	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,address:&SocketAddr) 
-		-> Result<(),io::Error> {
+		-> Result<String,io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		message.push(sender.len() as u8);
 		message.append(&mut sender.clone());
@@ -1552,8 +1562,10 @@ impl Server {
 				contents:String::from_utf8_lossy(&payload).to_string(),
 				timestamp:Local::now(),
 			});
+			return Ok(bytes_to_hex(&packet_hash.to_vec()));
+		} else {
+			return Ok(String::new());
 		}
-		return Ok(());
 	}
 	
 	// similar to the client version; sends a raw packet without modifying it. Will need to be pre-
@@ -2102,11 +2114,13 @@ impl Server {
 			ack_payload.append(&mut packet_hash.to_vec());
 			ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
 			if send {
+				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
 				match self.send_packet(&vec![],&vec![0x06],&ack_payload,&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
 			} else {
+				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
 				match self.send_packet(&vec![],&vec![0x03],&ack_payload.to_vec(),&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
