@@ -13,10 +13,11 @@ I. Network
 		3. WAN Links/Holepunching								[ ]
 	B. TCP																		[ ]
 		1. Connection bootstrapping							[ ]
+		2. Out-of-band initiation								[ ]
 	C. Addresses															[ ]
 		1. IPv4																	[ ]
 		2. IPv6																	[X]
-		3. DNS resolution												[ ]
+		3. DNS resolution												[X]
 II. Server																		
 	A. Subscriptions													[X]
 		1. Acceptance														[X]
@@ -79,6 +80,7 @@ use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
 use std::thread::sleep;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
+use std::str::FromStr;
 
 // converts a signed 64-bit int into eight bytes
 fn i64_to_bytes(number:&i64) -> [u8;8] {
@@ -554,23 +556,28 @@ pub struct Client {
 // client constructor, which takes a pad file path, a server address, and a local port
 // number and produces a new client object. also calls the Crypt constructor.
 pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u16) -> Result<Client,io::Error> {
-	let mut resolv_config = match resolve::config::DnsConfig::load_default() {
-		Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not get DNS configuration")),
-		Ok(config) => config,
-	};
-	resolv_config.use_inet6 = true;
-	let resolver = match resolve::resolver::DnsResolver::new(resolv_config) {
-		Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not initialize DNS resolver")),
-		Ok(resolver) => resolver,
-	};
-	let server_ip_address:IpAddr = match resolver.resolve_host(&string_address) {
-		Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"failed to resolve host")),
-		Ok(addrs) => {
-			let addrs_vec:Vec<IpAddr> = addrs.collect();
-			if addrs_vec.len() > 0 {
-				addrs_vec[0]
-			} else {
-				return Err(io::Error::new(io::ErrorKind::NotFound,"failed to resolve host"));
+	let server_ip_address:IpAddr = match IpAddr::from_str(&string_address) {
+		Ok(address) => address,
+		Err(_) => {
+			let mut resolv_config = match resolve::config::DnsConfig::load_default() {
+				Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not get DNS configuration")),
+				Ok(config) => config,
+			};
+			resolv_config.use_inet6 = true;
+			let resolver = match resolve::resolver::DnsResolver::new(resolv_config) {
+				Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not initialize DNS resolver")),
+				Ok(resolver) => resolver,
+			};
+			match resolver.resolve_host(&string_address) {
+				Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"failed to resolve host")),
+				Ok(addrs) => {
+					let addrs_vec:Vec<IpAddr> = addrs.collect();
+					if addrs_vec.len() > 0 {
+						addrs_vec[0]
+					} else {
+						return Err(io::Error::new(io::ErrorKind::NotFound,"failed to resolve host"));
+					}
+				},
 			}
 		},
 	};
@@ -579,8 +586,7 @@ pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
-	match UdpSocket::bind(SocketAddr::new(IpAddr::from([0,0,0,0,0,0,0,1]),local_port)) {
-	//match UdpSocket::bind(SocketAddr::new(IpAddr::from([0,0,0,0]),local_port)) {
+	match UdpSocket::bind(&format!("[::]:{}",&local_port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let mut created_client = Client {
@@ -1239,7 +1245,7 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
-	match UdpSocket::bind(SocketAddr::new(IpAddr::from([0,0,0,0,0,0,0,1]),port)) {
+	match UdpSocket::bind(&format!("[::]:{}",&port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let mut created_server = Server {
