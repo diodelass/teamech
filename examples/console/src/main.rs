@@ -491,6 +491,8 @@ fn main() {
 			Ok(client) => client,
 		};
 		client.send_provide_hashes = true;
+		client.name = client_name.to_owned();
+		client.classes.push(client_class.to_owned());
 		window_logger.print("Client initialized.");
 		let _ = client.set_asynchronous(10);
 		match window_logger.log_to_file(&format!("Opened log file."),Local::now()) {
@@ -505,22 +507,6 @@ fn main() {
 			match client.subscribe() {
 				Err(why) => {
 					window_logger.log(&format!("Failed to subscribe to server - {}.",why));
-					sleep(Duration::new(5,0));
-					continue 'authtry;
-				},
-				Ok(_) => (),
-			};
-			match client.set_name(&client_name) {
-				Err(why) => {
-					window_logger.log(&format!("Failed to set client name - {}.",why));
-					sleep(Duration::new(5,0));
-					continue 'authtry;
-				},
-				Ok(_) => (),
-			};
-			match client.add_class(&client_class) {
-				Err(why) => {
-					window_logger.log(&format!("Failed to set client class - {}.",why));
 					sleep(Duration::new(5,0));
 					continue 'authtry;
 				},

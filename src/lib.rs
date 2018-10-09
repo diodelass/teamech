@@ -1100,6 +1100,7 @@ impl Client {
 	// updates the local 'name' (unique identifier) field in the client object, 
 	// and also sends the new name to the server.
 	pub fn set_name(&mut self,name:&str) -> Result<(),io::Error> {
+		self.name = name.to_owned();
 		match self.send_packet(&vec![0x01],&name.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
@@ -1118,7 +1119,6 @@ impl Client {
 			}
 			Ok(_) => (),
 		};
-		self.name = name.to_owned();
 		self.event_log.push_back(Event {
 			class:EventClass::NameUpdate,
 			identifier:String::from("client"),
@@ -1133,6 +1133,9 @@ impl Client {
 	// adds an additional class (non-unique group identifier) to the local 
 	// 'classes' field, and sends the new class to the server.
 	pub fn add_class(&mut self,class:&str) -> Result<(),io::Error> {
+		if !self.classes.contains(&class.to_owned()) {
+			self.classes.push(class.to_owned());
+		}
 		match self.send_packet(&vec![0x11],&class.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
@@ -1151,7 +1154,6 @@ impl Client {
 			}
 			Ok(_) => (),
 		};
-		self.classes.push(class.to_owned());
 		self.event_log.push_back(Event {
 			class:EventClass::ClassAdd,
 			identifier:String::from("client"),
