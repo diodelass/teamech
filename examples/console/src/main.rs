@@ -1,4 +1,4 @@
-static VERSION:&str = "0.8.5 October 2018";
+static VERSION:&str = "0.8.6 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/console";
 static PROMPT:&str = "[teamech]~ ";
 static BAR:char = '-';
@@ -454,6 +454,7 @@ fn main() {
 		(@arg class: -c --class +takes_value "Non-unique identifier to present to the server for routing.")
 		(@arg localport: -p --localport +takes_value "UDP port to bind to locally (automatic if unset).")
 		(@arg showhex: -h --showhex "Show hexadecimal values of messages (useful if working with binary messages).")
+		(@arg ipv4: -o --ipv4 "Use IPv4 instead of IPv6.") 
 	).get_matches();
 	let client_name:&str = arguments.value_of("name").unwrap_or("human");
 	let client_class:&str = arguments.value_of("class").unwrap_or("supervisor");
@@ -482,7 +483,8 @@ fn main() {
 			&arguments.value_of("PADFILE").unwrap_or(""), 
 			&arguments.value_of("ADDRESS").unwrap_or(""),
 			arguments.value_of("PORT").unwrap_or("6666").parse::<u16>().unwrap_or(6666),
-			arguments.value_of("localport").unwrap_or("0").parse::<u16>().unwrap_or(0)) {
+			arguments.value_of("localport").unwrap_or("0").parse::<u16>().unwrap_or(0),
+			!arguments.is_present("ipv4")) {
 			Err(why) => {
 				endwin();
 				eprintln!("Failed to instantiate client: {}",why);

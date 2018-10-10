@@ -1,4 +1,4 @@
-// Teamech v 0.8.5 October 2018
+// Teamech v 0.8.6 October 2018
 // License: AGPL v3
 
 /*
@@ -39,6 +39,7 @@ II. Server
 		4. To other servers											[X]
 		5. Handling acknowledgements						[X]
 			a. Resending													[X]
+			b. Relaying acks back to source				[X]
 	C. Server-Server Links										[X]
 		1. Opening															[X] 
 		2. Closing															[X]
@@ -555,7 +556,7 @@ pub struct Client {
 
 // client constructor, which takes a pad file path, a server address, and a local port
 // number and produces a new client object. also calls the Crypt constructor.
-pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u16) -> Result<Client,io::Error> {
+pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
 	let server_ip_address:IpAddr = match IpAddr::from_str(&string_address) {
 		Ok(address) => address,
 		Err(_) => {
@@ -563,7 +564,7 @@ pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u
 				Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not get DNS configuration")),
 				Ok(config) => config,
 			};
-			resolv_config.use_inet6 = true;
+			resolv_config.use_inet6 = use_ipv6;
 			let resolver = match resolve::resolver::DnsResolver::new(resolv_config) {
 				Err(_why) => return Err(io::Error::new(io::ErrorKind::NotFound,"could not initialize DNS resolver")),
 				Ok(resolver) => resolver,
@@ -586,7 +587,13 @@ pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
-	match UdpSocket::bind(&format!("[::]:{}",&local_port)) {
+	let local_bind_address:&str;
+	if use_ipv6 {
+		local_bind_address = "[::]";
+	} else {
+		local_bind_address = "0.0.0.0";
+	}
+	match UdpSocket::bind(&format!("{}:{}",&local_bind_address,&local_port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let mut created_client = Client {
