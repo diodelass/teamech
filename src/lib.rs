@@ -543,7 +543,7 @@ pub struct Client {
 	pub receive_queue:VecDeque<Packet>,									// incoming packets that need to be processed by the implementation
 	pub subscribed:bool,																// are we subscribed?
 	pub event_log:VecDeque<Event>,											// log of events produced by the client
-	pub last_number_matched:([u8;8],u64),								// tracks ack match-count reporting
+	pub last_number_matched:VecDeque<([u8;8],u64)>,								// tracks ack match-count reporting
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,	// packets that need to be resent if they aren't acknowledged
 	pub recent_packets:VecDeque<[u8;8]>,								// hashes of packets that were recently seen, to merge double-sends
 	pub max_recent_packets:usize,												// max number of recent packet hashes to store
@@ -603,7 +603,7 @@ pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u
 				classes:Vec::new(),
 				receive_queue:VecDeque::new(),
 				event_log:VecDeque::new(),
-				last_number_matched:([0;8],0),
+				last_number_matched:VecDeque::new(),
 				subscribed:false,
 				unacked_packets:HashMap::new(),
 				recent_packets:VecDeque::new(),
@@ -747,42 +747,43 @@ impl Client {
 						}
 						if received_packet.valid && received_packet.parameter.len() > 0 {
 							match (received_packet.parameter[0],received_packet.payload.len()) {
-								(0x03,16) => {
+								(0x03,16)|(0x06,16) => {
 									let mut acked_hash:[u8;8] = [0;8];
 									let mut number_matched_bytes:[u8;8] = [0;8];
 									acked_hash.copy_from_slice(&received_packet.payload[..8]);
 									number_matched_bytes.copy_from_slice(&received_packet.payload[8..]);
 									let number_matched:u64 = bytes_to_u64(&number_matched_bytes);
-									if self.last_number_matched.0 == acked_hash {
-										self.last_number_matched = (acked_hash.clone(),self.last_number_matched.1+number_matched);
-									} else {
-										self.last_number_matched = (acked_hash.clone(),number_matched);
+									let mut matched:bool = false;
+									for number in self.last_number_matched.iter_mut() {
+										if number.0 == acked_hash {
+											*number = (acked_hash.clone(),number.1+number_matched);
+											matched = true;
+											break;
+										} 
+									}
+									if !matched {
+										self.last_number_matched.push_back((acked_hash.clone(),number_matched));
 									}
 									let _ = self.unacked_packets.remove(&acked_hash);
-									self.event_log.push_back(Event {
-										class:EventClass::TestResponse,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:format!("{}",&number_matched),
-										contents:bytes_to_hex(&acked_hash.to_vec()),
-										timestamp:Local::now(),
-									});
-								},
-								(0x06,16) => {
-									let mut acked_hash:[u8;8] = [0;8];
-									let mut number_matched_bytes:[u8;8] = [0;8];
-									acked_hash.copy_from_slice(&received_packet.payload[..8]);
-									number_matched_bytes.copy_from_slice(&received_packet.payload[8..]);
-									let number_matched:u64 = bytes_to_u64(&number_matched_bytes);
-									let _ = self.unacked_packets.remove(&acked_hash);
-									self.event_log.push_back(Event {
-										class:EventClass::Acknowledge,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:format!("{}",&number_matched),
-										contents:bytes_to_hex(&acked_hash.to_vec()),
-										timestamp:Local::now(),
-									});
+									if received_packet.parameter[0] == 0x03 {
+										self.event_log.push_back(Event {
+											class:EventClass::TestResponse,
+											identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
+											address:format!("{}",&source_address),
+											parameter:format!("{}",&number_matched),
+											contents:bytes_to_hex(&acked_hash.to_vec()),
+											timestamp:Local::now(),
+										});
+									} else {
+										self.event_log.push_back(Event {
+											class:EventClass::Acknowledge,
+											identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
+											address:format!("{}",&source_address),
+											parameter:format!("{}",&number_matched),
+											contents:bytes_to_hex(&acked_hash.to_vec()),
+											timestamp:Local::now(),
+										});
+									}
 								},
 								(0x06,0) => {
 									self.event_log.push_back(Event {
@@ -821,7 +822,10 @@ impl Client {
 									});
 								}
 								(b'>',_) => {
-									match self.send_packet(&vec![0x06],&packet_hash.to_vec()) {
+									let mut ack_payload:Vec<u8> = Vec::new();
+									ack_payload.append(&mut packet_hash.to_vec());
+									ack_payload.append(&mut u64_to_bytes(&1).to_vec());
+									match self.send_packet(&vec![0x06],&ack_payload) {
 										Err(why) => return Err(why),
 										Ok(_) => (),
 									};
@@ -1732,7 +1736,7 @@ impl Server {
 						match (received_packet.parameter[0],received_packet.payload.len()) {
 							(0x06,8)|(0x06,16)|(0x03,16) => {
 								let mut acked_hash:[u8;8] = [0;8];
-								acked_hash.copy_from_slice(&received_packet.payload[..]);
+								acked_hash.copy_from_slice(&received_packet.payload[..8]);
 								let mut ack_origin:Option<SocketAddr> = None;
 								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
 									match sub.unacked_packets.remove(&acked_hash) {
@@ -2157,14 +2161,15 @@ impl Server {
 			}
 			let mut ack_payload:Vec<u8> = Vec::new();
 			ack_payload.append(&mut packet_hash.to_vec());
-			ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
 			if send {
+				ack_payload.append(&mut u64_to_bytes(&0).to_vec());
 				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
 				match self.send_packet(&vec![],&vec![0x06],&ack_payload,&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
 			} else {
+				ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
 				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
 				match self.send_packet(&vec![],&vec![0x03],&ack_payload.to_vec(),&packet.source) {
 					Err(why) => return Err(why),
