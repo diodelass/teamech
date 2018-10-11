@@ -2,6 +2,8 @@ static VERSION:&str = "0.8.6 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/console";
 static PROMPT:&str = "[teamech]~ ";
 static BAR:char = '━';
+static BARSTOP_LEFT:char = '┫';
+static BARSTOP_RIGHT:char = '┣';
 
 extern crate teamech;
 
@@ -77,11 +79,13 @@ impl WindowLogger {
 			self.window.mv(0,0);
 			self.window.insdelln(-1);
 		}
-		let title:String = format!("[ Teamech Console {} ]",&VERSION);
+		let title:String = format!("{}{} Teamech Console {} {}",&BAR,&BARSTOP_LEFT,&VERSION,&BARSTOP_RIGHT);
 		self.window.mv(0,0);
 		self.window.addstr(&title);
-		for _x in 0..(self.window.get_max_x() as usize)-title.len() {
-			self.window.addstr(BAR.encode_utf8(&mut [0;4]));
+		if self.window.get_max_x() as usize > 21+&VERSION.len()+10 {
+			for _x in 0..(self.window.get_max_x() as usize)-&VERSION.len()-21 {
+				self.window.addstr(BAR.encode_utf8(&mut [0;4]));
+			}
 		}
 		self.window.attrset(Attribute::Normal);
 		self.window.mv(self.window.get_max_y()-2,0);
@@ -101,7 +105,7 @@ impl WindowLogger {
 			self.history[position].1 = line.to_owned();
 		}
 		if (position as i32)-(self.history_position as i32) > 0 
-			&& (position as i32)-(self.history_position as i32) < self.window.get_max_y()-2 {
+			&& (position as i32)-(self.history_position as i32)-(self.history.len() as i32) < self.window.get_max_y()-2 {
 			self.window.mv(
 				self.window.get_max_y()-3+((position as i32)-(self.history.len() as i32)+1)+(self.history_position as i32),
 				self.window.get_max_x()-(line.len() as i32)-1
@@ -165,15 +169,17 @@ impl WindowLogger {
 			tempstack.reverse();
 			subhistory.append(&mut tempstack);
 		}
-		while subhistory.len() > (self.window.get_max_y() as usize)-2 {
+		while subhistory.len() >= (self.window.get_max_y() as usize)-2 {
 			let _ = subhistory.pop();
 		}
 		subhistory.reverse();
-		let title:String = format!("Teamech Console {}",&VERSION);
+		let title:String = format!("{}{} Teamech Console {} {}",&BAR,&BARSTOP_LEFT,&VERSION,&BARSTOP_RIGHT);
 		self.window.mv(0,0);
 		self.window.addstr(&title);
-		for _x in 0..(self.window.get_max_x() as usize)-title.len() {
-			self.window.addstr(BAR.encode_utf8(&mut [0;4]));
+		if self.window.get_max_x() as usize > VERSION.len()+21 {
+			for _x in 0..(self.window.get_max_x() as usize)-VERSION.len()-21 {
+				self.window.addstr(BAR.encode_utf8(&mut [0;4]));
+			}
 		}
 		self.window.attrset(Attribute::Normal);
 		for line in subhistory.iter() {
