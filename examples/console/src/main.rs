@@ -1,7 +1,7 @@
 static VERSION:&str = "0.8.6 October 2018";
 static LOG_DIRECTORY:&str = ".teamech-logs/console";
 static PROMPT:&str = "[teamech]~ ";
-static BAR:char = '-';
+static BAR:char = '━';
 
 extern crate teamech;
 
