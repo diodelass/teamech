@@ -401,7 +401,7 @@ impl Event {
 					&self.parameter);
 			},
 			EventClass::ServerUnsubscribe => {
-				return format!("[{}] Subscription closed by {} [{}]",&timestamp,&self.identifier,&self.address);
+				return format!("[{}] Subscription closed for {} [{}]",&timestamp,&self.identifier,&self.address);
 			},
 			EventClass::ClientSubscribe => {
 				return format!("[{}] Subscribed to [{}]",&timestamp,&self.address);
@@ -1274,7 +1274,7 @@ pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> 
 				event_log:VecDeque::new(),
 				max_recent_packets:64,
 				max_unsent_packets:32,
-				max_resend_tries:10,
+				max_resend_tries:3,
 				max_resend_failures:1,
 				crypt:new_crypt,
 				receive_queue:VecDeque::new(),
@@ -1996,6 +1996,20 @@ impl Server {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
+					let client_name:String;
+					if sub.1.classes.len() > 0 {
+						client_name = format!("@{}/#{}",&sub.1.name,&sub.1.classes[0]);
+					} else {
+						client_name = format!("@{}",&sub.1.name);
+					}
+					self.event_log.push_back(Event {
+						class:EventClass::ServerUnsubscribe,
+						identifier:client_name,
+						address:format!("{}",&sub.1.address),
+						parameter:String::new(),
+						contents:String::new(),
+						timestamp:Local::now(),
+					});
 					continue;
 				}
 			}
@@ -2007,6 +2021,20 @@ impl Server {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
+					let client_name:String;
+					if sub.1.classes.len() > 0 {
+						client_name = format!("@{}/#{}",&sub.1.name,&sub.1.classes[0]);
+					} else {
+						client_name = format!("@{}",&sub.1.name);
+					}
+					self.event_log.push_back(Event {
+						class:EventClass::ServerUnsubscribe,
+						identifier:client_name,
+						address:format!("{}",&sub.1.address),
+						parameter:String::new(),
+						contents:String::new(),
+						timestamp:Local::now(),
+					});
 					continue;
 				}
 			}
