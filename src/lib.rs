@@ -1,4 +1,4 @@
-// Teamech v 0.8.6 October 2018
+// Teamech v 0.9.0 October 2018
 // License: AGPL v3
 
 /*
@@ -202,134 +202,86 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 	}
 }
 
-// object for handling encryption and decryption using Teacrypt.
-// stores data from a pad file, and possesses member functions 
-// which allow the pad to be used to encrypt and decrypt data.
 pub struct Crypt {
-	pub pad_path:String,
-	pub pad_data:Vec<u8>,
-	pub pad_length:usize,
+	pub bytes:[u8;32],
 }
 
-// constructor for a Crypt object. opens a pad file, reads it into memory, and returns 
-// a Crypt object containing the data.
-// calling this function will cause the program's memory usage to quickly increase by
-// the size of the pad file, and will block until the pad file has finished loading - 
-// this would be a good time to let the user know that a long operation is about to 
-// happen, especially if they are using a very large pad file and/or a slow disk.
-// TODO: add runtime option to not load the pad file and instead always access it in-place.
-// TODO: add support for raw block devices as pad files.
-pub fn new_crypt(new_pad_path:&str) -> Result<Crypt,io::Error> {
-	let mut new_pad_data:Vec<u8> = Vec::new();
-	match File::open(&new_pad_path) {
+pub fn new_crypt(key_path:&str) -> Result<Crypt,io::Error> {
+	let mut key_bytes:Vec<u8> = Vec::new();
+	let mut key_file = match File::open(&key_path) {
 		Err(why) => return Err(why),
-		Ok(mut file) => match file.read_to_end(&mut new_pad_data) {
-			Err(why) => return Err(why),
-			Ok(nbytes) => {
-				return Ok(Crypt {
-					pad_path:new_pad_path.to_owned(),
-					pad_data:new_pad_data,
-					pad_length:nbytes,
-				});
-			},
-		},
+		Ok(file) => file,
 	};
+	match key_file.read_to_end(&mut key_bytes) {
+		Err(why) => return Err(why),
+		Ok(_) => (),
+	};
+	let mut hashed_bytes:[u8;32] = [0;32];
+	let mut sha3 = Keccak::new_sha3_256();
+	sha3.update(&key_bytes);
+	sha3.finalize(&mut hashed_bytes);
+	return Ok(Crypt {
+		bytes:hashed_bytes,
+	});
 }
 
 impl Crypt {
 
-	// generates a key of a specific length using a specific nonce (eight bytes
-	// indicating where to start on the pad file). returns the requested key and
-	// that key's corresponding secret seed.
-	// this function doesn't need to be called directly to encrypt or decrypt data,
-	// but remains public in case it is needed for any unconventional implementations.
-	pub fn keygen(&self,nonce:&[u8;8],key_size:&usize) -> (Vec<u8>,Vec<u8>) {
-		let mut seed:[u8;8] = [0;8];
-		let mut seed_temp_1:[u8;8] = nonce.clone();
-		let mut seed_temp_2:[u8;8] = [0;8];
-		for x in 0..8 {
-			let mut sha3 = Keccak::new_sha3_256();
-			sha3.update(&nonce.clone());
-			sha3.update(&seed_temp_1);
-			if x >= 1 {
-				sha3.update(&[seed[x-1]]);
-			}
-			sha3.finalize(&mut seed_temp_2);
-			seed_temp_1 = seed_temp_2;
-			seed[x] = self.pad_data[(bytes_to_u64(&seed_temp_1) as usize)%self.pad_length];
-		}
-		let mut key_bytes:Vec<u8> = Vec::with_capacity(*key_size);
-		let mut key_temp_1:[u8;8] = seed;
-		let mut key_temp_2:[u8;8] = [0;8];
-		for x in 0..*key_size {
-			let mut sha3 = Keccak::new_sha3_256();
-			sha3.update(&seed);
-			sha3.update(&key_temp_1);
-			if x >= 1 {
-				sha3.update(&[key_bytes[x-1]]);
-			}
-			sha3.finalize(&mut key_temp_2);
-			key_temp_1 = key_temp_2;
-			key_bytes.push(self.pad_data[(bytes_to_u64(&key_temp_1) as usize)%self.pad_length]);
-		}
-		return (key_bytes,seed.to_vec());
-	}
-
-	// uses the pad data (calling the keygen function) to encrypt provided data, providing
-	// a sealed bottle which can be transmitted. unlike previous Teacrypt versions, this
-	// implementation inserts a timestamp during encryption.
 	pub fn encrypt(&self,message:&Vec<u8>) -> Vec<u8> {
 		let mut timestamped_message:Vec<u8> = message.clone();
 		timestamped_message.append(&mut i64_to_bytes(&Local::now().timestamp_millis()).to_vec());
 		let nonce:u64 = rand::random::<u64>();
 		let nonce_bytes:[u8;8] = u64_to_bytes(&nonce);
-		let key_size:usize = timestamped_message.len()+8;
-		let (key_bytes,seed) = self.keygen(&nonce_bytes,&key_size);
-		let mut signature:[u8;8] = [0;8];
-		let mut sha3 = Keccak::new_sha3_256();
-		sha3.update(&seed);
-		sha3.update(&timestamped_message);
-		sha3.update(&key_bytes);
-		sha3.finalize(&mut signature);
+		let overlay_size:usize = timestamped_message.len()+16;
+		let mut overlay_bytes:Vec<u8> = vec![0;overlay_size];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&nonce_bytes[..]);
+		shake.update(&self.bytes[..]);
+		shake.finalize(&mut overlay_bytes);
+		let mut signature:[u8;16] = [0;16];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&timestamped_message);
+		shake.update(&overlay_bytes);
+		shake.finalize(&mut signature);
 		let mut signed_message = Vec::new();
 		signed_message.append(&mut timestamped_message.clone());
 		signed_message.append(&mut signature.to_vec());
-		let mut bottle = Vec::new();
-		for x in 0..key_size {
-			bottle.push(signed_message[x] ^ key_bytes[x]);
+		let mut bottle = vec![0;overlay_size];
+		for x in 0..overlay_size {
+			bottle[x] = signed_message[x] ^ overlay_bytes[x];
 		}
 		bottle.append(&mut nonce_bytes.to_vec());
 		return bottle;
 	}
-	
-	// uses the pad data to decrypt and validate a provided bottle, producing the decrypted
-	// data, the timestamp indicating when the message was encrypted, and a boolean flag
-	// indicating whether or not the data validated successfully. 
+
 	pub fn decrypt(&self,bottle:&Vec<u8>) -> (Vec<u8>,i64,bool) {
 		if bottle.len() < 24 {
 			return (Vec::new(),0,false);
 		}
 		let mut nonce_bytes:[u8;8] = [0;8];
 		nonce_bytes.copy_from_slice(&bottle[bottle.len()-8..bottle.len()]);
-		let key_size = bottle.len()-8;
+		let overlay_size = bottle.len()-8;
 		let encrypted_bytes:Vec<u8> = bottle[0..bottle.len()-8].to_vec();
-		let (key_bytes,seed) = self.keygen(&nonce_bytes,&key_size);
-		let mut signed_message = Vec::new();
-		for x in 0..key_size {
-			signed_message.push(encrypted_bytes[x] ^ key_bytes[x]);
+		let mut key_bytes:Vec<u8> = vec![0;overlay_size];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&nonce_bytes[..]);
+		shake.update(&self.bytes[..]);
+		shake.finalize(&mut key_bytes);
+		let mut signed_message = vec![0;overlay_size];
+		for x in 0..overlay_size {
+			signed_message[x] = encrypted_bytes[x] ^ key_bytes[x];
 		}
-		let mut signature:[u8;8] = [0;8];
+		let mut signature:[u8;16] = [0;16];
 		let mut timestamp:[u8;8] = [0;8];
-		signature.copy_from_slice(&signed_message[signed_message.len()-8..]);
-		timestamp.copy_from_slice(&signed_message[signed_message.len()-16..signed_message.len()-8]);
-		let timestamped_message:Vec<u8> = signed_message[0..signed_message.len()-8].to_vec();
+		signature.copy_from_slice(&signed_message[signed_message.len()-16..]);
+		timestamp.copy_from_slice(&signed_message[signed_message.len()-24..signed_message.len()-16]);
+		let timestamped_message:Vec<u8> = signed_message[0..signed_message.len()-16].to_vec();
 		let message:Vec<u8> = timestamped_message[..timestamped_message.len()-8].to_vec();
-		let mut correct_signature:[u8;8] = [0;8];
-		let mut sha3 = Keccak::new_sha3_256();
-		sha3.update(&seed);
-		sha3.update(&timestamped_message);
-		sha3.update(&key_bytes);
-		sha3.finalize(&mut correct_signature);
+		let mut correct_signature:[u8;16] = [0;16];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&timestamped_message);
+		shake.update(&key_bytes);
+		shake.finalize(&mut correct_signature);
 		return (message,bytes_to_i64(&timestamp),signature == correct_signature);
 	}
 
@@ -556,7 +508,7 @@ pub struct Client {
 
 // client constructor, which takes a pad file path, a server address, and a local port
 // number and produces a new client object. also calls the Crypt constructor.
-pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
+pub fn new_client(key_path:&str,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
 	let server_ip_address:IpAddr = match IpAddr::from_str(&string_address) {
 		Ok(address) => address,
 		Err(_) => {
@@ -583,7 +535,7 @@ pub fn new_client(pad_path:&str,string_address:&str,remote_port:u16,local_port:u
 		},
 	};
 	let server_socket_address:SocketAddr = SocketAddr::new(server_ip_address,remote_port);
-	let new_crypt:Crypt = match new_crypt(&pad_path) {
+	let new_crypt:Crypt = match new_crypt(&key_path) {
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
@@ -1253,8 +1205,8 @@ pub struct Server {
 }
 
 // server constructor, works very similarly to client constructor
-pub fn new_server(name:&str,pad_path:&str,port:u16) -> Result<Server,io::Error> {
-	let new_crypt:Crypt = match new_crypt(&pad_path) {
+pub fn new_server(name:&str,key_path:&str,port:u16) -> Result<Server,io::Error> {
+	let new_crypt:Crypt = match new_crypt(&key_path) {
 		Err(why) => return Err(why),
 		Ok(crypt) => crypt,
 	};
@@ -1723,7 +1675,7 @@ impl Server {
 								reject_reason = "server full";
 							}
 							self.event_log.push_back(Event {
-								class:EventClass::ServerSubscribe,
+								class:EventClass::ServerSubscribeFailure,
 								identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
 								address:format!("{}",&source_address),
 								parameter:format!("rejected ({})",&reject_reason),
