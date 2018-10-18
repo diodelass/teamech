@@ -76,7 +76,8 @@ extern crate resolve;
 
 use std::io::prelude::*;
 use std::io;
-use std::fs::File;
+use std::fs::{File,read_dir,create_dir_all};
+use std::path::Path;
 use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
 use std::thread::sleep;
@@ -202,88 +203,6 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 	}
 }
 
-pub struct Crypt {
-	pub bytes:[u8;32],
-}
-
-pub fn new_crypt(key_path:&str) -> Result<Crypt,io::Error> {
-	let mut key_bytes:Vec<u8> = Vec::new();
-	let mut key_file = match File::open(&key_path) {
-		Err(why) => return Err(why),
-		Ok(file) => file,
-	};
-	match key_file.read_to_end(&mut key_bytes) {
-		Err(why) => return Err(why),
-		Ok(_) => (),
-	};
-	let mut hashed_bytes:[u8;32] = [0;32];
-	let mut sha3 = Keccak::new_sha3_256();
-	sha3.update(&key_bytes);
-	sha3.finalize(&mut hashed_bytes);
-	return Ok(Crypt {
-		bytes:hashed_bytes,
-	});
-}
-
-impl Crypt {
-
-	pub fn encrypt(&self,message:&Vec<u8>) -> Vec<u8> {
-		let mut timestamped_message:Vec<u8> = message.clone();
-		timestamped_message.append(&mut i64_to_bytes(&Local::now().timestamp_millis()).to_vec());
-		let nonce:u64 = rand::random::<u64>();
-		let nonce_bytes:[u8;8] = u64_to_bytes(&nonce);
-		let overlay_size:usize = timestamped_message.len()+16;
-		let mut overlay_bytes:Vec<u8> = vec![0;overlay_size];
-		let mut shake = Keccak::new_shake256();
-		shake.update(&nonce_bytes[..]);
-		shake.update(&self.bytes[..]);
-		shake.finalize(&mut overlay_bytes);
-		let mut signature:[u8;16] = [0;16];
-		let mut shake = Keccak::new_shake256();
-		shake.update(&timestamped_message);
-		shake.update(&overlay_bytes);
-		shake.finalize(&mut signature);
-		let mut signed_message = Vec::new();
-		signed_message.append(&mut timestamped_message.clone());
-		signed_message.append(&mut signature.to_vec());
-		let mut bottle = vec![0;overlay_size];
-		for x in 0..overlay_size {
-			bottle[x] = signed_message[x] ^ overlay_bytes[x];
-		}
-		bottle.append(&mut nonce_bytes.to_vec());
-		return bottle;
-	}
-
-	pub fn decrypt(&self,bottle:&Vec<u8>) -> (Vec<u8>,i64,bool) {
-		if bottle.len() < 24 {
-			return (Vec::new(),0,false);
-		}
-		let mut nonce_bytes:[u8;8] = [0;8];
-		nonce_bytes.copy_from_slice(&bottle[bottle.len()-8..bottle.len()]);
-		let overlay_size = bottle.len()-8;
-		let encrypted_bytes:Vec<u8> = bottle[0..bottle.len()-8].to_vec();
-		let mut key_bytes:Vec<u8> = vec![0;overlay_size];
-		let mut shake = Keccak::new_shake256();
-		shake.update(&nonce_bytes[..]);
-		shake.update(&self.bytes[..]);
-		shake.finalize(&mut key_bytes);
-		let mut signed_message = vec![0;overlay_size];
-		for x in 0..overlay_size {
-			signed_message[x] = encrypted_bytes[x] ^ key_bytes[x];
-		}
-		let mut signature:[u8;16] = [0;16];
-		let mut timestamp:[u8;8] = [0;8];
-		signature.copy_from_slice(&signed_message[signed_message.len()-16..]);
-		timestamp.copy_from_slice(&signed_message[signed_message.len()-24..signed_message.len()-16]);
-		let timestamped_message:Vec<u8> = signed_message[0..signed_message.len()-16].to_vec();
-		let message:Vec<u8> = timestamped_message[..timestamped_message.len()-8].to_vec();
-		let mut correct_signature:[u8;16] = [0;16];
-		let mut shake = Keccak::new_shake256();
-		shake.update(&timestamped_message);
-		shake.update(&key_bytes);
-		shake.finalize(&mut correct_signature);
-		return (message,bytes_to_i64(&timestamp),signature == correct_signature);
-	}
 
 } // impl Crypt
 
@@ -312,6 +231,8 @@ pub enum EventClass {
 	RoutedMessage,						// message relayed to one or more matched clients
 	GlobalMessage,						// message matching all clients
 	InvalidMessage,						// message whose signature or timestamp did not validate
+	NullDecrypt,							// message was decrypted using the null decryptor and is NOT secure
+	NullEncrypt,							// message was encrypted using the null encryptor and is NOT secure
 	DeliveryRetry,						// resend of message that was not acknowledged the first time it was sent
 	DeliveryFailure,					// message was resent too many times with no acknowledgement, and has been given up on
 	NameUpdate,								// client set or changed its name
@@ -324,6 +245,8 @@ pub enum EventClass {
 	ClassListResponse,				// server responded to class list request
 	ClientListRequest,				// client requested the list of all connected clients
 	ClientListResponse,				// server responded to client list request
+	IdentityLoad,							// finished loading identity file(s)
+	IdentityLoadFailure,			// failed to load one or more identity files
 }
 
 pub struct Event {
@@ -468,6 +391,8 @@ pub struct Packet {
 	pub timestamp:i64,			// when packet was received
 	pub source:SocketAddr,	// sending socket address
 	pub sender:Vec<u8>,			// sender's declared identifier (@name/#class)
+	pub crypt_tag:Vec<u8>,
+	pub crypt_null:bool,
 	pub parameter:Vec<u8>,	// message parameter (e.g. routing expression)
 	pub payload:Vec<u8>,		// message payload
 }
@@ -491,7 +416,7 @@ pub struct Client {
 	pub server_address:SocketAddr,											// address of server we're subscribed to
 	pub name:String,																		// our self-declared name
 	pub classes:Vec<String>,														// our self-declared classes
-	pub crypt:Crypt,																		// crypt object holding key data
+	pub identity:Identity,
 	pub receive_queue:VecDeque<Packet>,									// incoming packets that need to be processed by the implementation
 	pub subscribed:bool,																// are we subscribed?
 	pub event_log:VecDeque<Event>,											// log of events produced by the client
@@ -506,9 +431,7 @@ pub struct Client {
 	pub send_provide_hashes:bool,
 }
 
-// client constructor, which takes a pad file path, a server address, and a local port
-// number and produces a new client object. also calls the Crypt constructor.
-pub fn new_client(key_path:&str,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
+pub fn new_client(identity_path:&str,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
 	let server_ip_address:IpAddr = match IpAddr::from_str(&string_address) {
 		Ok(address) => address,
 		Err(_) => {
@@ -535,9 +458,9 @@ pub fn new_client(key_path:&str,string_address:&str,remote_port:u16,local_port:u
 		},
 	};
 	let server_socket_address:SocketAddr = SocketAddr::new(server_ip_address,remote_port);
-	let new_crypt:Crypt = match new_crypt(&key_path) {
+	let new_identity:Identity = match load_identity_file(&Path::new(&identity_path)) {
 		Err(why) => return Err(why),
-		Ok(crypt) => crypt,
+		Ok(id) => id,
 	};
 	let local_bind_address:&str;
 	if use_ipv6 {
@@ -561,7 +484,7 @@ pub fn new_client(key_path:&str,string_address:&str,remote_port:u16,local_port:u
 				recent_packets:VecDeque::new(),
 				max_recent_packets:32,
 				max_resend_tries:3,
-				crypt:new_crypt,
+				identity:new_identity,
 				uptime:Local::now().timestamp_millis(),
 				time_tolerance_ms:3000,
 				synchronous:true,
@@ -607,19 +530,39 @@ impl Client {
 		}
 	}
 
-	pub fn decrypt_packet(&self,bottle:&Vec<u8>,source_address:&SocketAddr) -> Packet {
+	pub fn decrypt_packet(&mut self,bottle:&Vec<u8>,source_address:&SocketAddr) -> Packet {
 		let now:i64 = Local::now().timestamp_millis();
 		let mut decrypted_bytes:Vec<u8> = Vec::new();
 		let mut timestamp:i64 = 0;
 		let mut message_valid:bool = false;
+		let mut crypt_null:bool = false;
 		let mut sender_bytes:Vec<u8> = Vec::new();
 		let mut parameter_bytes:Vec<u8> = Vec::new();
 		let mut payload_bytes:Vec<u8> = Vec::new();
-		if bottle.len() >= 24 {
-			let decryption = self.crypt.decrypt(&bottle);
-			decrypted_bytes = decryption.0;
-			timestamp = decryption.1;
-			message_valid = decryption.2;
+		if bottle.len() >= 40 {
+			if bottle[bottle.len()-8..] == vec![0;8][..] {
+				let null_identity = Identity { key:vec![0;32],tag:vec![0;8],name:String::new(),classes:vec![] };
+				let null_decryption = null_identity.decrypt(&bottle);
+				if null_decryption.valid {
+					decrypted_bytes = null_decryption.message;
+					timestamp = null_decryption.timestamp;
+					message_valid = null_decryption.valid;
+					crypt_null = true;
+					self.event_log.push_back(Event {
+						class:EventClass::NullDecrypt,
+						identifier:String::new(),
+						address:format!("{}",&source_address),
+						parameter:String::new(),
+						contents:String::new(),
+						timestamp:Local::now(),
+					});
+				}
+			} else {
+				let decryption = self.identity.decrypt(&bottle);
+				decrypted_bytes = decryption.message;
+				timestamp = decryption.timestamp;
+				message_valid = decryption.valid;
+			}
 		}
 		if decrypted_bytes.len() >= 2 {
 			// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
@@ -650,6 +593,8 @@ impl Client {
 			timestamp:timestamp,
 			source:source_address.clone(),
 			sender:sender_bytes,
+			crypt_tag:self.identity.tag.clone(),
+			crypt_null:crypt_null,
 			parameter:parameter_bytes,
 			payload:payload_bytes,
 		}
@@ -843,7 +788,7 @@ impl Client {
 		message.push(parameter.len() as u8);
 		message.append(&mut parameter.clone());
 		message.append(&mut payload.clone());
-		let bottle:Vec<u8> = self.crypt.encrypt(&message);
+		let bottle:Vec<u8> = self.identity.encrypt(&message);
 		match self.send_raw(&bottle) {
 			Err(why) => {
 				self.event_log.push_back(Event {
@@ -997,7 +942,9 @@ impl Client {
 	// 0x15 if something's wrong (e.g. server full) or an unreadable packet
 	// if we have the wrong pad file.
 	pub fn subscribe(&mut self) -> Result<(),io::Error> {
-		match self.send_packet(&vec![0x02],&vec![]) {
+		let nonce:u64 = rand::random::<u64>();
+		let nonce_bytes:Vec<u8> = i64_to_bytes(&nonce).to_vec();
+		match self.send_packet(&vec![0x02],&nonce_bytes) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
@@ -1060,112 +1007,134 @@ impl Client {
 		return Ok(());
 	}
 
-	// updates the local 'name' (unique identifier) field in the client object, 
-	// and also sends the new name to the server.
-	pub fn set_name(&mut self,name:&str) -> Result<(),io::Error> {
-		self.name = name.to_owned();
-		match self.send_packet(&vec![0x01],&name.as_bytes().to_vec()) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		match self.get_response(&vec![0x06]) {
-			Err(why) => {
-				self.event_log.push_back(Event {
-					class:EventClass::NameUpdateFailure,
-					identifier:String::from("client"),
-					address:String::from("local"),
-					parameter:String::new(),
-					contents:format!("{}",why),
-					timestamp:Local::now(),
-				});
-				return Err(why);
-			}
-			Ok(_) => (),
-		};
-		self.event_log.push_back(Event {
-			class:EventClass::NameUpdate,
-			identifier:String::from("client"),
-			address:String::from("local"),
-			parameter:String::new(),
-			contents:name.to_owned(),
-			timestamp:Local::now(),
-		});
-		return Ok(());
-	}
-
-	// adds an additional class (non-unique group identifier) to the local 
-	// 'classes' field, and sends the new class to the server.
-	pub fn add_class(&mut self,class:&str) -> Result<(),io::Error> {
-		if !self.classes.contains(&class.to_owned()) {
-			self.classes.push(class.to_owned());
-		}
-		match self.send_packet(&vec![0x11],&class.as_bytes().to_vec()) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		match self.get_response(&vec![0x06]) {
-			Err(why) => {
-				self.event_log.push_back(Event {
-					class:EventClass::ClassAddFailure,
-					identifier:String::from("client"),
-					address:String::from("local"),
-					parameter:String::new(),
-					contents:format!("{}",why),
-					timestamp:Local::now(),
-				});
-				return Err(why);
-			}
-			Ok(_) => (),
-		};
-		self.event_log.push_back(Event {
-			class:EventClass::ClassAdd,
-			identifier:String::from("client"),
-			address:String::from("local"),
-			parameter:String::new(),
-			contents:class.to_owned(),
-			timestamp:Local::now(),
-		});
-		return Ok(());
-	}
-
-	// removes a class from the local 'classes' field, and sends the removal to
-	// the server.
-	pub fn remove_class(&mut self,class:&str) -> Result<(),io::Error> {
-		match self.send_packet(&vec![0x12],&class.as_bytes().to_vec()) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		match self.get_response(&vec![0x06]) {
-			Err(why) => {
-				self.event_log.push_back(Event {
-					class:EventClass::ClassRemoveFailure,
-					identifier:String::from("client"),
-					address:String::from("local"),
-					parameter:String::new(),
-					contents:format!("{}",why),
-					timestamp:Local::now(),
-				});
-				return Err(why);
-			}
-			Ok(_) => (),
-		};
-		for n in (0..self.classes.len()).rev() {
-			if &self.classes[n] == class {
-				self.classes.remove(n);
-			}
-		}
-		self.event_log.push_back(Event {
-			class:EventClass::ClassRemove,
-			identifier:String::from("client"),
-			address:String::from("local"),
-			parameter:String::new(),
-			contents:class.to_owned(),
-			timestamp:Local::now(),
-		});
-		return Ok(());
-	}
-
 } // impl Client
+
+pub struct Decrypt {
+	pub message:Vec<u8>,
+	pub timestamp:i64,
+	pub valid:bool,
+}
+
+#[derive(Clone)]
+pub struct Identity {
+	pub tag:Vec<u8>,
+	pub key:Vec<u8>,
+	pub name:String,
+	pub classes:HashSet<String>,
+}
+
+pub fn load_identity_file(identity_path:&Path) -> Result<Identity,io::Error> {
+	let mut identity_bytes:Vec<u8> = Vec::new();
+	let mut identity_file = match File::open(&identity_path) {
+		Err(why) => return Err(why),
+		Ok(file) => file,
+	};
+	match identity_file.read_to_end(&mut identity_bytes) {
+		Err(why) => return Err(why),
+		Ok(_) => (),
+	};
+	let mut tag:Vec<u8> = vec![0;8];
+	let mut key:Vec<u8> = vec![0;32];
+	let mut name:String = String::new();
+	let mut classes:Vec<String> = Vec::new();
+	for line in identity_bytes.split(b'\n') {
+		if line.len() >= 16 && line[0] == b'I' {
+			let mut shake = Keccak::new_shake256();
+			shake.update(&line[1..16]);
+			shake.finalize(&mut tag);
+		}
+		if line.len() > 64 && line[0] == b'K' {
+			let mut sha3 = Keccak::new_sha3_256();
+			sha3.update(&line[1..64]);
+			sha3.finalize(&mut key);
+		}
+		if line.len() > 1 && line[0] == b'@' {
+			let new_name:String = String::from_utf8_lossy(&line[1..]).to_string();
+			new_name = new_name.trim_matches('\r').to_owned();
+			name = new_name;
+		}
+		if line.len() > 1 && line[0] == b'#' {
+			let new_class:String = String::from_utf8_lossy(&line[1..]).to_string();
+			new_class = new_class.trim_matches('\r').to_owned();
+			classes.insert(new_class);
+		}
+	}
+	if tag == vec![0;8] ||key == vec![0;32] || name == String::new() || classes == vec![] {
+		 return Err(io::Error::new(io::ErrorKind::InvalidData,"identity file is incomplete"));
+	}
+	return Ok(Identity {
+		tag:tag,
+		key:key,
+		name:name,
+		classes:classes,
+	});
+}
+
+impl Identity {
+
+	pub fn encrypt(&self,message:&Vec<u8>) -> Vec<u8> {
+		let mut timestamped_message:Vec<u8> = message.clone();
+		timestamped_message.append(&mut i64_to_bytes(&Local::now().timestamp_millis()).to_vec());
+		let nonce:u64 = rand::random::<u64>();
+		let nonce_bytes:[u8;8] = u64_to_bytes(&nonce);
+		let overlay_size:usize = timestamped_message.len()+16;
+		let mut overlay_bytes:Vec<u8> = vec![0;overlay_size];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&nonce_bytes[..]);
+		shake.update(&self.key[..]);
+		shake.finalize(&mut overlay_bytes);
+		let mut signature:[u8;16] = [0;16];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&timestamped_message);
+		shake.update(&overlay_bytes);
+		shake.finalize(&mut signature);
+		let mut signed_message = Vec::new();
+		signed_message.append(&mut timestamped_message.clone());
+		signed_message.append(&mut signature.to_vec());
+		let mut bottle = vec![0;overlay_size];
+		for x in 0..overlay_size {
+			bottle[x] = signed_message[x] ^ overlay_bytes[x];
+		}
+		bottle.append(&mut nonce_bytes.to_vec());
+		bottle.append(&mut self.tag.clone());
+		return bottle;
+	}
+
+	pub fn decrypt(&self,bottle:&Vec<u8>) -> Decrypt {
+		if bottle.len() < 40 {
+			return (Vec::new(),0,false);
+		}
+		let mut nonce_bytes:[u8;8] = [0;8];
+		nonce_bytes.copy_from_slice(&bottle[bottle.len()-16..bottle.len()-8]);
+		let overlay_size = bottle.len()-16;
+		let mut key_bytes:Vec<u8> = vec![0;overlay_size];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&nonce_bytes[..]);
+		shake.update(&self.key[..]);
+		shake.finalize(&mut key_bytes);
+		let mut signed_message = vec![0;overlay_size];
+		for x in 0..overlay_size {
+			signed_message[x] = bottle[x] ^ key_bytes[x];
+		}
+		let mut signature:[u8;16] = [0;16];
+		let mut timestamp:[u8;8] = [0;8];
+		signature.copy_from_slice(&signed_message[signed_message.len()-16..]);
+		timestamp.copy_from_slice(&signed_message[signed_message.len()-24..signed_message.len()-16]);
+		let timestamped_message:Vec<u8> = signed_message[0..signed_message.len()-16].to_vec();
+		let message:Vec<u8> = timestamped_message[..timestamped_message.len()-8].to_vec();
+		let mut correct_signature:[u8;16] = [0;16];
+		let mut shake = Keccak::new_shake256();
+		shake.update(&timestamped_message);
+		shake.update(&key_bytes);
+		shake.finalize(&mut correct_signature);
+		return Decrypt {
+			message:message,
+			timestamp:bytes_to_i64(&timestamp),
+			valid:(signature == correct_signature),
+		};
+	}
+
+}
 
 // subscription object for tracking subscribed clients. constructed only by the
 // receive_packets method when it receives a valid but unrecognized message 
@@ -1173,8 +1142,7 @@ impl Client {
 #[derive(Clone)]
 pub struct Subscription {
 	pub address:SocketAddr,																	// socket address of subscriber
-	pub name:String,																				// subscriber's self-declared name
-	pub classes:Vec<String>,																// subscriber's self-declared classes
+	pub identity:Identity,
 	pub uptime:i64,																					// time at which this subscription was created
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
 	pub delivery_failures:u64,															// number of times a packet delivery has failed
@@ -1184,6 +1152,7 @@ pub struct Subscription {
 pub struct Server {
 	pub name:String,
 	pub socket:UdpSocket,
+	pub identities:HashMap<Vec<u8>,Identity>,
 	pub subscribers:HashMap<SocketAddr,Subscription>,
 	pub linked_servers:HashMap<SocketAddr,Subscription>,
 	pub max_subscribers:usize,
@@ -1196,7 +1165,6 @@ pub struct Server {
 	pub max_resend_tries:u64,
 	pub max_resend_failures:u64,
 	pub event_log:VecDeque<Event>,
-	pub crypt:Crypt,
 	pub receive_queue:VecDeque<Packet>,
 	pub uptime:i64,
 	pub synchronous:bool,
@@ -1205,11 +1173,7 @@ pub struct Server {
 }
 
 // server constructor, works very similarly to client constructor
-pub fn new_server(name:&str,key_path:&str,port:u16) -> Result<Server,io::Error> {
-	let new_crypt:Crypt = match new_crypt(&key_path) {
-		Err(why) => return Err(why),
-		Ok(crypt) => crypt,
-	};
+pub fn new_server(name:&str,port:u16) -> Result<Server,io::Error> {
 	match UdpSocket::bind(&format!("[::]:{}",&port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
@@ -1228,7 +1192,6 @@ pub fn new_server(name:&str,key_path:&str,port:u16) -> Result<Server,io::Error> 
 				max_unsent_packets:32,
 				max_resend_tries:3,
 				max_resend_failures:1,
-				crypt:new_crypt,
 				receive_queue:VecDeque::new(),
 				uptime:Local::now().timestamp_millis(),
 				synchronous:true,
@@ -1250,19 +1213,77 @@ pub fn new_server(name:&str,key_path:&str,port:u16) -> Result<Server,io::Error> 
 
 impl Server {
 
-	pub fn decrypt_packet(&self,bottle:&Vec<u8>,source_address:&SocketAddr) -> Packet {
+	pub fn load_identities(&mut self,identity_dir:&Path) -> Result<(),io::Error> {
+		match fs::create_dir_all(&identity_dir) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		let dir_iterator = match read_dir(&identity_dir) {
+			Err(why) => return Err(why),
+			Ok(files) => files,
+		};
+		let mut number_loaded:usize = 0;
+		for dir_node in dir_iterator {
+			if let Ok(dir_entry) = dir_node {
+				if dir_entry.file_type().is_file() {
+					let file_path = dir_entry.path().as_path();
+					let new_identity:Identity = match load_identity_file(&file_path) {
+						Err(why) => {
+							self.event_log.push_back(Event {
+								class:EventClass::IdentityLoadFailure,
+								identifier:String::new(),
+								address:String::new(),
+								parameter:String::new(),
+								contents:format!("{}",&file_path.display()),
+								timestamp:Local::now(),
+							});
+							continue;
+						},
+						Ok(id) => id,
+					};
+					self.event_log.push_back(Event {
+						class:EventClass::IdentityLoad,
+						identifier:new_identity.name.clone(),
+						address:String::new(),
+						parameter:String::new(),
+						contents:format!("{}",&file_path.display()),
+						timestamp:Local::now(),
+					});
+					self.identities.insert(new_identity.identifier.clone(),new_identity);
+				}
+			}
+		}
+	}
+
+	pub fn decrypt_packet(&mut self,bottle:&Vec<u8>,source_address:&SocketAddr) -> Packet {
 		let now:i64 = Local::now().timestamp_millis();
 		let mut decrypted_bytes:Vec<u8> = Vec::new();
 		let mut timestamp:i64 = 0;
 		let mut message_valid:bool = false;
+		let mut id_null:bool = false;
 		let mut sender_bytes:Vec<u8> = Vec::new();
 		let mut parameter_bytes:Vec<u8> = Vec::new();
 		let mut payload_bytes:Vec<u8> = Vec::new();
-		if bottle.len() >= 24 {
-			let decryption = self.crypt.decrypt(&bottle);
-			decrypted_bytes = decryption.0;
-			timestamp = decryption.1;
-			message_valid = decryption.2;
+		if bottle.len() >= 40 {
+			let decryption:Decrypt;
+			if let Some(identity) = self.identities.get(&bottle[bottle.len()-8..]) {
+				decryption = identity.decrypt(&bottle);
+			} else {
+				let null_identity = Identity { key:vec![0;32],tag:vec![0;8],name:String::new(),classes:vec![] };
+				decryption = null_identity.decrypt(&bottle);
+				id_null = true;
+				self.event_log.push_back(Event {
+					class:EventClass::NullDecrypt,
+					identifier:String::new(),
+					address:format!("{}",&source_address),
+					parameter:String::new(),
+					contents:String::new(),
+					timestamp:Local::now(),
+				});
+			}
+			decrypted_bytes = decryption.message;
+			timestamp = decryption.timestamp;
+			message_valid = decryption.valid;
 		}
 		if decrypted_bytes.len() >= 2 {
 			// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
@@ -1293,6 +1314,8 @@ impl Server {
 			timestamp:timestamp,
 			source:source_address.clone(),
 			sender:sender_bytes,
+			crypt_tag:bottle[bottle.len()-8..].to_vec(),
+			crypt_null:crypt_null,
 			parameter:parameter_bytes,
 			payload:payload_bytes,
 		}
@@ -1374,10 +1397,10 @@ impl Server {
 		return Ok(());
 	}
 
-	pub fn link_server(&mut self,remote_address:&SocketAddr) -> Result<(),io::Error> {
+	pub fn link_server(&mut self,remote_address:&SocketAddr,crypt_tag:&Vec<u8>) -> Result<(),io::Error> {
 		let server_name:String = self.name.clone();
 		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x02],
-			&vec![],&remote_address) {
+			&vec![],&crypt_tag,&remote_address) {
 			Err(why) => {
 				self.event_log.push_back(Event {
 					class:EventClass::ServerLinkFailure,
@@ -1406,7 +1429,7 @@ impl Server {
 			Ok(_) => (),
 		};
 		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x12],
-			&b"server".to_vec(),&remote_address) {
+			&b"server".to_vec(),&crypt_tag,&remote_address) {
 			Err(why) => {
 				self.event_log.push_back(Event {
 					class:EventClass::ClassAddFailure,
@@ -1435,7 +1458,7 @@ impl Server {
 			Ok(_) => (),
 		};
 		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x01],
-			&server_name.as_bytes().to_vec(),&remote_address) {
+			&server_name.as_bytes().to_vec(),&crypt_tag,&remote_address) {
 			Err(why) => {
 				self.event_log.push_back(Event {
 					class:EventClass::NameUpdateFailure,
@@ -1468,6 +1491,7 @@ impl Server {
 			name:String::new(),
 			classes:vec![String::from("server")],
 			uptime:Local::now().timestamp_millis(),
+			crypt_tag:crypt_tag.clone(),
 			unacked_packets:HashMap::new(),
 			delivery_failures:0,
 		});	
@@ -1485,13 +1509,17 @@ impl Server {
 	// 
 	pub fn unlink_server(&mut self,remote_address:&SocketAddr) -> Result<(),io::Error> {
 		let server_name = self.name.clone();
-		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x18],&vec![],&remote_address) {
+		let mut crypt_tag:Vec<u8> = vec![0;8];
+		if let Some(linked_server) = self.linked_servers.get(&remote_address) {
+			crypt_tag = linked_server.crypt_tag.clone();
+		}
+		match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),&vec![0x18],&vec![],&crypt_tag,&remote_address) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		for sub in self.subscribers.clone().iter() {
-			if sub.0 == remote_address && sub.1.classes.contains(&"server".to_owned()) {
-				let _ = self.subscribers.remove(&sub.0);
+		for sub in self.linked_servers.clone().iter() {
+			if sub.0 == remote_address {
+				let _ = self.linked_servers.remove(&sub.0);
 			}
 		}
 		self.event_log.push_back(Event {
@@ -1506,7 +1534,7 @@ impl Server {
 	}
 
 	// encrypts and transmits a packet, much like the client version.
-	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,address:&SocketAddr) 
+	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,crypt_tag:&Vec<u8>,address:&SocketAddr) 
 		-> Result<String,io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		message.push(sender.len() as u8);
@@ -1514,7 +1542,21 @@ impl Server {
 		message.push(parameter.len() as u8);
 		message.append(&mut parameter.clone());
 		message.append(&mut payload.clone());
-		let bottle:Vec<u8> = self.crypt.encrypt(&message);
+		let null_identity = Identity { key:vec![0;32],tag:vec![0;8],name:String::new(),classes:vec![] };
+		let bottle:Vec<u8>;
+		if let Some(identity) = self.identities.get(crypt_tag) {
+			bottle = identity.encrypt(&message);
+		} else {
+			bottle = null_identity.encrypt(&message);
+			self.event_log.push_back(Event {
+				class:EventClass::NullEncrypt,
+				identifier:String::new(),
+				address:format!("{}",&address),
+				parameter:String::new(),
+				contents:String::new(),
+				timestamp:Local::now(),
+			});
+		}
 		let mut recipient:String = String::new();
 		if let Some(sub) = self.subscribers.get_mut(&address) {
 			if sub.classes.len() > 0 {
@@ -1635,19 +1677,49 @@ impl Server {
 						self.banned_addresses.insert(source_address.ip());
 						continue;
 					}
+					if receive_length < 40 {
+						self.ban_points.insert(source_address.ip(),current_ban_points+1);
+						self.event_log.push_back(Event {
+							class:EventClass::InvalidMessage,
+							identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
+							address:format!("{}",&source_address),
+							parameter:String::from("packet length too short"),
+							contents:String::new(),
+							timestamp:Local::now(),
+						});
+						continue;
+					}
+					let packet_crypt_tag:Vec<u8> = input_buffer[receive_length-8..receive_length].to_vec();
+					let sender_identity:Identity;
+					if let Some(id) = self.identities.get(&packet_crypt_tag) {
+						sender_identity = id.clone();
+					} else {
+						self.ban_points.insert(source_address.ip(),current_ban_points+1);
+						self.event_log.push_back(Event {
+							class:EventClass::UnknownSender,
+							identifier:String::new(),
+							address:format!("{}",&source_address),
+							parameter:String::new(),
+							contents:String::new(),
+							timestamp:Local::now(),
+						});
+						continue;
+					}
 					let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
-					if !self.subscribers.contains_key(&source_address) && !self.linked_servers.contains_key(&source_address) {
+					if !self.subscribers.contains_key(&source_address) 
+					&& !self.linked_servers.contains_key(&source_address) 
+					&& received_packet.payload.len() >= 8 
+					&& received_packet.parameter == 0x02 {
 						if received_packet.valid && self.subscribers.len() < self.max_subscribers {
 							self.subscribers.insert(source_address.clone(),Subscription {
 								address:source_address.clone(),
-								name:String::new(),
-								classes:Vec::new(),
+								identity:sender_identity.clone(),
 								uptime:Local::now().timestamp_millis(),
 								unacked_packets:HashMap::new(),
 								delivery_failures:0,
 							});	
 							match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-								&vec![0x02],&vec![],&source_address) {
+								&vec![0x02],&vec![],&received_packet.crypt_tag,&source_address) {
 								Err(why) => return Err(why),
 								Ok(_) => (),
 							};
@@ -1661,7 +1733,7 @@ impl Server {
 							});
 						} else {
 							match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-								&vec![0x15],&vec![],&source_address) {
+								&vec![0x15],&vec![],&received_packet.crypt_tag,&source_address) {
 								Err(why) => return Err(why),
 								Ok(_) => (),
 							};
@@ -1729,7 +1801,7 @@ impl Server {
 							(0x18,0) => {
 								let _ = self.subscribers.remove(&source_address);
 								match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-									&vec![0x19],&vec![],&source_address) {
+									&vec![0x19],&vec![],&received_packet.crypt_tag,&source_address) {
 									Err(why) => return Err(why),
 									Ok(_) => (),
 								};
@@ -1742,162 +1814,6 @@ impl Server {
 									timestamp:Local::now(),
 								});
 							},
-							(0x01,_) => {
-								let new_name:String = String::from_utf8_lossy(&received_packet.payload).to_string();
-								let mut name_valid:bool = true;
-								for c in ['&','|',' ','!','^'].iter() {
-									if new_name.contains(*c) {
-										name_valid = false;
-										break;
-									}
-								}
-								if new_name.as_bytes().len() > 128 {
-									name_valid = false;
-								}
-								if name_valid {
-									if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-										sub.name = new_name.clone();
-									}
-									match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-										&vec![0x06],&vec![],&source_address) {
-										Err(why) => return Err(why),
-										Ok(_) => (),
-									};
-									self.event_log.push_back(Event {
-										class:EventClass::NameUpdate,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:String::new(),
-										contents:new_name.to_owned(),
-										timestamp:Local::now(),
-									});
-								} else {
-									match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-										&vec![0x15],&vec![],&source_address) {
-										Err(why) => return Err(why),
-										Ok(_) => (),
-									};
-									self.event_log.push_back(Event {
-										class:EventClass::NameUpdateFailure,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:String::new(),
-										contents:new_name.to_owned(),
-										timestamp:Local::now(),
-									});
-								}
-							},
-							(0x11,_) => {
-								let new_class:String = String::from_utf8_lossy(&received_packet.payload).to_string();
-								let mut class_valid:bool = true;
-								for c in ['&','|',' ','!','^'].iter() {
-									if new_class.contains(*c) {
-										class_valid = false;
-										break;
-									}
-								}
-								if new_class.as_bytes().len() > 128 {
-									class_valid = false;
-								}
-								if class_valid {
-									if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-										if !sub.classes.contains(&new_class) {
-											sub.classes.push(new_class.clone());
-										}
-									}
-									if let Some(mut sub) = self.linked_servers.get_mut(&source_address) {
-										if !sub.classes.contains(&new_class) {
-											sub.classes.push(new_class.clone());
-										}
-									}
-									match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-										&vec![0x06],&vec![],&source_address) {
-										Err(why) => return Err(why),
-										Ok(_) => (),
-									};
-									self.event_log.push_back(Event {
-										class:EventClass::ClassAdd,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:String::new(),
-										contents:new_class.to_owned(),
-										timestamp:Local::now(),
-									});
-									self.re_sort_subs();
-								} else {
-									match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-										&vec![0x15],&vec![],&source_address) {
-										Err(why) => return Err(why),
-										Ok(_) => (),
-									};
-									self.event_log.push_back(Event {
-										class:EventClass::ClassAddFailure,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:String::new(),
-										contents:new_class.to_owned(),
-										timestamp:Local::now(),
-									});
-								}
-							},
-							(0x12,_) => {
-								let deleted_class:String = String::from_utf8_lossy(&received_packet.payload).to_string();
-								if let Some(mut sub) = self.subscribers.get_mut(&source_address) {
-									for n in (0..sub.classes.len()).rev() {
-										if sub.classes[n] == deleted_class {
-											sub.classes.remove(n);
-										}
-									}
-								}
-								if let Some(mut sub) = self.linked_servers.get_mut(&source_address) {
-									for n in (0..sub.classes.len()).rev() {
-										if sub.classes[n] == deleted_class {
-											sub.classes.remove(n);
-										}
-									}
-								}
-								match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-									&vec![0x06],&vec![],&source_address) {
-									Err(why) => return Err(why),
-									Ok(_) => (),
-								};
-								self.event_log.push_back(Event {
-									class:EventClass::ClassRemove,
-									identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-									address:format!("{}",&source_address),
-									parameter:String::new(),
-									contents:deleted_class.to_owned(),
-									timestamp:Local::now(),
-								});
-								self.re_sort_subs();
-							},
-							(0x13,0) => {
-								if let Some(mut sub) = self.subscribers.clone().get(&source_address) {
-									self.event_log.push_back(Event {
-										class:EventClass::ClassListRequest,
-										identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-										address:format!("{}",&source_address),
-										parameter:String::new(),
-										contents:String::new(),
-										timestamp:Local::now(),
-									});
-									for class in sub.classes.iter() {
-										match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-											&vec![0x13],&class.as_bytes().to_vec(),&source_address) {
-											Err(why) => return Err(why),
-											Ok(_) => (),
-										};
-										self.event_log.push_back(Event {
-											class:EventClass::ClassListResponse,
-											identifier:String::from_utf8_lossy(&received_packet.sender).to_string(),
-											address:format!("{}",&source_address),
-											parameter:String::new(),
-											contents:class.to_owned(),
-											timestamp:Local::now(),
-										});
-									}
-								}
-							}
 							(b'>',_) => {
 								if received_packet.valid {
 									self.event_log.push_back(Event {
@@ -1944,7 +1860,7 @@ impl Server {
 				if !sub.1.classes.contains(&"server".to_owned()) {
 					self.subscribers.remove(&sub.0);
 					match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-						&vec![0x19],&vec![],&sub.0) {
+						&vec![0x19],&vec![],&sub.1.crypt_tag,&sub.0) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
@@ -1969,7 +1885,7 @@ impl Server {
 				if !sub.1.classes.contains(&"server".to_owned()) {
 					self.subscribers.remove(&sub.0);
 					match self.send_packet(&format!("@{}/#server",&server_name).as_bytes().to_vec(),
-						&vec![0x19],&vec![],&sub.0) {
+						&vec![0x19],&vec![],&sub.1.crypt_tag,&sub.0) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
@@ -2066,7 +1982,7 @@ impl Server {
 		let mut number_matched:u64 = 0;
 		for server in self.linked_servers.clone().iter_mut() {
 			if &packet.source != server.0 && packet.parameter.len() >= 1 && packet.parameter[0] == b'>' {
-				match self.send_raw(&packet.raw,&server.0) {
+				match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&server.1.crypt_tag,&server.0) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
@@ -2093,7 +2009,7 @@ impl Server {
 				|| sub.1.classes.contains(&"supervisor".to_owned())
 				|| sub.1.classes.contains(&"server".to_owned())) {
 				if send {
-					match self.send_raw(&packet.raw,&sub.0) {
+					match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&sub.1.crypt_tag,&sub.0) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
@@ -2144,14 +2060,14 @@ impl Server {
 			if send {
 				ack_payload.append(&mut u64_to_bytes(&0).to_vec());
 				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
-				match self.send_packet(&vec![],&vec![0x06],&ack_payload,&packet.source) {
+				match self.send_packet(&vec![],&vec![0x06],&ack_payload,&packet.crypt_tag,&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
 			} else {
 				ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
 				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
-				match self.send_packet(&vec![],&vec![0x03],&ack_payload.to_vec(),&packet.source) {
+				match self.send_packet(&vec![],&vec![0x03],&ack_payload.to_vec(),&packet.crypt_tag,&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};

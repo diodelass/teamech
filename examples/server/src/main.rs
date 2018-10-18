@@ -1,5 +1,7 @@
 static VERSION:&str = "0.9.0 October 2018";
-static LOG_DIRECTORY:&str = ".teamech-logs/server/";
+static MAIN_DIRECTORY:&str = ".teamech/";
+static LOG_DIRECTORY:&str = "logs/server/";
+static KEY_DIRECTORY:&str = "keys/server/";
 
 extern crate teamech;
 
@@ -31,7 +33,7 @@ impl Logger {
 			None => PathBuf::new(),
 			Some(pathbuf) => pathbuf,
 		};
-		let logdir:&Path = &userhome.as_path().join(&LOG_DIRECTORY);
+		let logdir:&Path = &userhome.as_path().join(&MAIN_DIRECTORY).join(&LOG_DIRECTORY);
 		match fs::create_dir_all(&logdir) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
