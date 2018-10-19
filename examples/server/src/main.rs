@@ -1,4 +1,4 @@
-static VERSION:&str = "0.9.0 October 2018";
+static VERSION:&str = "0.10.0 October 2018";
 static MAIN_DIRECTORY:&str = ".teamech/";
 static LOG_DIRECTORY:&str = "logs/server/";
 static KEY_DIRECTORY:&str = "keys/server/";
@@ -9,7 +9,6 @@ extern crate teamech;
 extern crate clap;
 
 extern crate dirs;
-use dirs::home_dir;
 
 extern crate chrono;
 use chrono::prelude::*;
@@ -22,29 +21,27 @@ use std::fs;
 use std::fs::File;
 
 struct Logger {
-	log_file_name:String,
+	log_file_path:PathBuf,
 }
 
 impl Logger {
 
 	// Accepts a path to a log file, and writes a line to it, generating a human- and machine-readable log.
 	fn log_to_file(&self,logstring:&str) -> Result<(),io::Error> {
-		let userhome:PathBuf = match home_dir() {
-			None => PathBuf::new(),
-			Some(pathbuf) => pathbuf,
+		let log_dir:&Path = match self.log_file_path.parent() {
+			None => Path::new("."),
+			Some(dir) => dir,
 		};
-		let logdir:&Path = &userhome.as_path().join(&MAIN_DIRECTORY).join(&LOG_DIRECTORY);
-		match fs::create_dir_all(&logdir) {
+		match fs::create_dir_all(&log_dir) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		let logpath:&Path = &logdir.join(&self.log_file_name);
 		let mut log_file = match fs::OpenOptions::new() 
-											.append(true)
-											.open(&logpath) {
+		.append(true)
+		.open(&self.log_file_path) {
 			Ok(file) => file,
 			Err(why) => match why.kind() {
-				io::ErrorKind::NotFound => match File::create(&logpath) {
+				io::ErrorKind::NotFound => match File::create(&self.log_file_path) {
 					Ok(file) => file,
 					Err(why) => return Err(why),
 				},
@@ -58,7 +55,7 @@ impl Logger {
 	}
 
 	fn log(&self,logstring:&str) {
-		let log_file_name:String = self.log_file_name.clone();
+		let log_file_name:String = self.log_file_path.to_str().unwrap_or("unknown").to_owned();
 		match self.log_to_file(&logstring) {
 			Err(why) => {
 				eprintln!("ERROR: Failed to write to log file at {}: {}",&log_file_name,why);
@@ -76,28 +73,44 @@ fn main() {
 		(version: VERSION)
 		(author: "Ellie D.")
 		(about: "Server for the Teamech protocol.")
-		(@arg PORT: +required "Local port number on which to listen for incoming data.")
-		(@arg PADFILE: +required "Pad file to use for encryption/decryption (must be same as clients').")
+		(@arg logs: -l --logdir +takes_value "Path to directory where logs files should be stored.")
+		(@arg keys: -k --iddir +takes_value "Path to directory where identity files are stored.")
+		(@arg port: -p --port +takes_value "Local port number on which to listen for incoming data.")
 		(@arg name: -n --name +takes_value "Unique name to identify this server to other servers.")
 	).get_matches();
 	// parse values from arguments
-	let port_number:u16 = match arguments.value_of("PORT").unwrap_or("6666").parse::<u16>() {
+	let port_number:u16 = match arguments.value_of("port").unwrap_or("6666").parse::<u16>() {
 		Err(why) => {
-			eprintln!("Failed to parse port number argument as an integer. See --help for help.");
+			eprintln!("Failed to parse given port number as an integer. See --help for help.");
 			eprintln!("{}",why);
 			process::exit(1);
 		},
 		Ok(n) => n,
 	};
-	let logger:Logger = Logger {
-		log_file_name:format!("{}-teamech-server.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()),
+	let home_dir:PathBuf = match dirs::home_dir() {
+		None => {
+			eprintln!("Warning: Could not determine home directory. Using local directory instead.");
+			Path::new(".").to_owned()
+		},
+		Some(dir) => dir,
 	};
-	let pad_path:&str = arguments.value_of("PADFILE").unwrap_or("");
+	let identity_dir:PathBuf = match arguments.value_of("keys") {
+		None => (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&KEY_DIRECTORY))).to_owned(),
+		Some(pathvalue) => Path::new(&pathvalue).to_owned(),
+	};
+
+	let log_dir:PathBuf = match arguments.value_of("logs") {
+		None => (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&LOG_DIRECTORY))).to_owned(),
+		Some(pathvalue) => Path::new(&pathvalue).to_owned(),
+	};
+	let logger:Logger = Logger {
+		log_file_path:log_dir.join(Path::new(&format!("{}-teamech-server.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()))),
+	};
 	let server_name:&str = arguments.value_of("name").unwrap_or("server");
 	// recovery loop handles basic stateful setup of server initially, and catches breaks from the processor loop.
 	'recovery:loop {
 		// initialize a new server object with the arguments collected from the command line.
-		let mut server = match teamech::new_server(&server_name,&pad_path,port_number) {
+		let mut server = match teamech::new_server(&server_name,&port_number) {
 			Err(why) => {
 				eprintln!("Failed to instantiate server: {}",why);
 				process::exit(1);
@@ -109,6 +122,15 @@ fn main() {
 			Err(why) => eprintln!("Warning: Failed to set server to asynchronous mode: {}",why),
 			Ok(_) => (),
 		};
+		match server.load_identities(&identity_dir) {
+			Err(why) => {
+				eprintln!("Failed to load identities from {}: {}",&identity_dir.display(),why);
+			},
+			Ok(_) => (),
+		};
+		if server.identities.len() == 0 {
+			eprintln!("Error: no readable identities found in {}. No client subscriptions can be opened!",&identity_dir.display());
+		}
 		// processor loop does not break under ideal conditions and handles all standard functions.
 		'processor:loop {
 			// collect packets from clients, and append them to the server's receive_queue.

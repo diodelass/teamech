@@ -1,4 +1,4 @@
-// Teamech v 0.9.0 October 2018
+// Teamech v 0.10.0 October 2018
 // License: AGPL v3
 
 /*
@@ -119,7 +119,7 @@ fn bytes_to_hex(v:&Vec<u8>) -> String {
 			result.push_str(&format!("{:x?}",v[x]));
 		}
 		if x < v.len()-1 {
-			result.push_str(" ");
+			result.push_str(".");
 		}
 	}
 	return result;
@@ -232,14 +232,6 @@ pub enum EventClass {
 	NullEncrypt,							// message was encrypted using the null encryptor and is NOT secure
 	DeliveryRetry,						// resend of message that was not acknowledged the first time it was sent
 	DeliveryFailure,					// message was resent too many times with no acknowledgement, and has been given up on
-	NameUpdate,								// client set or changed its name
-	NameUpdateFailure,				// client tried to change its name to an invalid value
-	ClassAdd,									// client added itself to a class
-	ClassAddFailure,					// client tried to add an invalid class
-	ClassRemove,							// client removed itself from a class
-	ClassRemoveFailure,				// failed to remove client from class
-	ClassListRequest,					// client requested its class list
-	ClassListResponse,				// server responded to class list request
 	ClientListRequest,				// client requested the list of all connected clients
 	ClientListResponse,				// server responded to client list request
 	IdentityLoad,							// finished loading identity file(s)
@@ -336,33 +328,11 @@ impl Event {
 				return format!("[{}] [delivery failed] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,
 					&self.identifier,&self.address);
 			},
-			EventClass::NameUpdate => {
-				return format!("[{}] {} [{}] set name to @{}",&timestamp,&self.identifier,&self.address,&self.contents);
-			},
-			EventClass::NameUpdateFailure => {
-				return format!("[{}] {} [{}] could not set name to @{}",&timestamp,&self.identifier,&self.address,&self.contents);
-			},
-			EventClass::ClassAdd => {
-				return format!("[{}] {} [{}] added class #{}",&timestamp,&self.identifier,&self.address,&self.contents);
-			},
-			EventClass::ClassAddFailure => {
-				return format!("[{}] {} [{}] could not add class #{}",
-					&timestamp,&self.identifier,&self.address,&self.contents);
-			},
-			EventClass::ClassRemove => {
-				return format!("[{}] {} [{}] deleted class #{}",&timestamp,&self.identifier,&self.address,&self.contents);
-			},
-			EventClass::ClassListRequest => {
-				return format!("[{}] {} [{}] requested class list.",&timestamp,&self.identifier,&self.address);
-			},
-			EventClass::ClassListResponse => {
-				return format!("[{}] class list for {} [{}]: #{}",&timestamp,&self.identifier,&self.address,&self.contents);
-			},
-			EventClass::ClientListRequest => {
-				return format!("[{}] {} [{}] requested client list.",&timestamp,&self.identifier,&self.address);
-			},
 			EventClass::ClientListResponse => {
 				return format!("[{}] client list for {} [{}]: #{}",&timestamp,&self.identifier,&self.address,&self.contents);
+			},
+			EventClass::IdentityLoad => {
+				return format!("[{}] found identity: {} [hashed ID: {}]",&timestamp,&self.identifier,&self.parameter);
 			},
 			_ => return String::new(),
 		};
@@ -1030,7 +1000,7 @@ pub fn load_identity_file(identity_path:&Path) -> Result<Identity,io::Error> {
 	let mut name:String = String::new();
 	let mut classes:Vec<String> = Vec::new();
 	for line in identity_bytes.split(|c|c==&b'\n') {
-		if line.len() >= 16 && line[0] == b'I' {
+		if line.len() > 16 && line[0] == b'I' {
 			let mut shake = Keccak::new_shake256();
 			shake.update(&line[1..16]);
 			shake.finalize(&mut tag);
@@ -1176,8 +1146,8 @@ pub struct Server {
 }
 
 // server constructor, works very similarly to client constructor
-pub fn new_server(name:&str,port:u16) -> Result<Server,io::Error> {
-	match UdpSocket::bind(&format!("[::]:{}",&port)) {
+pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
+	match UdpSocket::bind(&format!("[::]:{}",port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let mut created_server = Server {
@@ -1250,9 +1220,9 @@ impl Server {
 					};
 					self.event_log.push_back(Event {
 						class:EventClass::IdentityLoad,
-						identifier:new_identity.name.clone(),
+						identifier:format!("@{}/#{}",&new_identity.name,&new_identity.classes[0]),
 						address:String::new(),
-						parameter:String::new(),
+						parameter:bytes_to_hex(&new_identity.tag),
 						contents:format!("{}",&file_path.display()),
 						timestamp:Local::now(),
 					});
@@ -1276,6 +1246,7 @@ impl Server {
 			let decryption:Decrypt;
 			if let Some(identity) = self.identities.get(&bottle[bottle.len()-8..]) {
 				decryption = identity.decrypt(&bottle);
+				sender_bytes = format!("@{}/#{}",&identity.name,&identity.classes[0]).as_bytes().to_vec();
 			} else {
 				let null_identity = Identity { key:vec![0;32],tag:vec![0;8],name:String::new(),classes:vec![] };
 				decryption = null_identity.decrypt(&bottle);
@@ -1297,11 +1268,6 @@ impl Server {
 			// by this point, decrypted_bytes consists of the entire decrypted packet, minus the timestamp, signature,
 			// and nonce. everything from the end of the parameter string to the last byte is the payload.
 			let sender_length:usize = decrypted_bytes[0] as usize;
-			if sender_length+2 <= decrypted_bytes.len() {
-				for scan_position in 1..sender_length+1 {
-					sender_bytes.push(decrypted_bytes[scan_position]);
-				}
-			}
 			let parameter_length:usize = decrypted_bytes[sender_length+1] as usize;
 			if sender_length+parameter_length+2 <= decrypted_bytes.len() {
 				for scan_position in sender_length+2..sender_length+parameter_length+2 {
@@ -1500,11 +1466,7 @@ impl Server {
 		}
 		let mut recipient:String = String::new();
 		if let Some(sub) = self.subscribers.get_mut(&address) {
-			if sub.identity.classes.len() > 0 {
-				recipient = format!("@{}/#{}",sub.identity.name,sub.identity.classes[0]);
-			} else {
-				recipient = format!("@{}",sub.identity.name);
-			}
+			recipient = format!("@{}/#{}",sub.identity.name,sub.identity.classes[0]);
 		}
 		match self.socket.send_to(&bottle[..],&address) {
 			Err(why) => {
@@ -1779,12 +1741,7 @@ impl Server {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
-					let client_name:String;
-					if sub.identity.classes.len() > 0 {
-						client_name = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
-					} else {
-						client_name = format!("@{}",&sub.identity.name);
-					}
+					let client_name:String = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
 					self.event_log.push_back(Event {
 						class:EventClass::ServerUnsubscribe,
 						identifier:client_name,
@@ -1803,12 +1760,7 @@ impl Server {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
-					let client_name:String;
-					if sub.identity.classes.len() > 0 {
-						client_name = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
-					} else {
-						client_name = format!("@{}",&sub.identity.name);
-					}
+					let client_name:String = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
 					self.event_log.push_back(Event {
 						class:EventClass::ServerUnsubscribe,
 						identifier:client_name,
@@ -1918,19 +1870,13 @@ impl Server {
 			}
 			if packet.source != sub.address && packet.parameter.len() >= 1 && packet.parameter[0] == b'>'
 				&& (wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&subscriber_identifiers) 
-				|| sub.identity.classes.contains(&"supervisor".to_owned())
-				|| sub.identity.classes.contains(&"server".to_owned())) {
+				|| sub.identity.classes.contains(&"supervisor".to_owned())) {
 				if send {
 					match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&sub.identity.tag,&sub.address) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
 					};
-					let mut recipient:String;
-					if sub.identity.classes.len() > 0 {
-						recipient = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
-					} else {
-						recipient = format!("@{}",&sub.identity.name);
-					}
+					let recipient:String = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
 					if packet.parameter.len() > 1 {
 						self.event_log.push_back(Event {
 							class:EventClass::RoutedMessage,
@@ -1946,12 +1892,7 @@ impl Server {
 						let _ = self.recent_packets.pop_front();
 					}
 					if let Some(mut listed_sub) = self.subscribers.get_mut(&sub.address) {
-						let mut recipient:String;
-						if listed_sub.identity.classes.len() > 0 {
-							recipient = format!("@{}/#{}",listed_sub.identity.name,listed_sub.identity.classes[0]);
-						} else {
-							recipient = format!("@{}",listed_sub.identity.name);
-						}
+						let recipient:String = format!("@{}/#{}",listed_sub.identity.name,listed_sub.identity.classes[0]);
 						listed_sub.unacked_packets.insert(packet_hash.clone(),UnackedPacket {
 							raw:packet.raw.clone(),
 							decrypted:packet.payload.clone(),
@@ -2003,7 +1944,7 @@ impl Server {
 				contents:String::from_utf8_lossy(&packet.payload).to_string(),
 				timestamp:Local::now(),
 			});
-		} else if packet.parameter.len() <= 1 {
+		} else if packet.parameter.len() == 1 {
 			self.event_log.push_back(Event {
 				class:EventClass::GlobalMessage,
 				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
