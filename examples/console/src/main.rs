@@ -1,9 +1,14 @@
-static VERSION:&str = "0.9.0 October 2018";
-static LOG_DIRECTORY:&str = ".teamech-logs/console";
+static VERSION:&str = "0.10.0 October 2018";
+static MAIN_DIRECTORY:&str = ".teamech/";
+static LOG_DIRECTORY:&str = "logs/console/";
+static KEY_DIRECTORY:&str = "keys/console/";
 static PROMPT:&str = "[teamech]~ ";
-static BAR:char = '━';
-static BARSTOP_LEFT:char = '┫';
-static BARSTOP_RIGHT:char = '┣';
+//static BAR:char = '━';
+//static BARSTOP_LEFT:char = '┫';
+//static BARSTOP_RIGHT:char = '┣';
+static BAR:char = '-';
+static BARSTOP_LEFT:char = '[';
+static BARSTOP_RIGHT:char = ']';
 
 extern crate teamech;
 
@@ -11,7 +16,6 @@ extern crate pancurses;
 use pancurses::*;
 
 extern crate dirs;
-use dirs::home_dir;
 
 #[macro_use]
 extern crate clap;
@@ -200,7 +204,7 @@ impl WindowLogger {
 
 	// Accepts a path to a log file, and writes a line to it, generating a human- and machine-readable log.
 	fn log_to_file(&mut self,logstring:&str,timestamp:DateTime<Local>) -> Result<(),io::Error> {
-		let userhome:PathBuf = match home_dir() {
+		let userhome:PathBuf = match dirs::home_dir() {
 			None => PathBuf::new(),
 			Some(pathbuf) => pathbuf,
 		};
@@ -454,11 +458,11 @@ fn main() {
 		(author: "Ellie D.")
 		(about: "Desktop console client for the Teamech protocol.")
 		(@arg ADDRESS: +required "Remote address to contact.")
-		(@arg PORT: +required "Remote port on which to contact the server.")
-		(@arg PADFILE: +required "Pad file to use for encryption/decryption (must be same as server's).")
+		(@arg KEY: +required "Identity file to use for encryption/decryption (must be matched by a duplicate file registered on the server).")
+		(@arg port: -p --port +takes_value "Remote port on which to contact the server.")
 		(@arg name: -n --name +takes_value "Unique identifier to present to the server for routing.")
 		(@arg class: -c --class +takes_value "Non-unique identifier to present to the server for routing.")
-		(@arg localport: -p --localport +takes_value "UDP port to bind to locally (automatic if unset).")
+		(@arg localport: -l --localport +takes_value "UDP port to bind to locally (automatic if unset).")
 		(@arg showhex: -h --showhex "Show hexadecimal values of messages (useful if working with binary messages).")
 		(@arg ipv4: -o --ipv4 "Use IPv4 instead of IPv6.") 
 	).get_matches();
@@ -482,14 +486,37 @@ fn main() {
 		window_logger.print(&format!("Teamech Console {}",&VERSION));
 		window_logger.print("Press <Esc> to exit (or Ctrl-C to force exit).");
 		window_logger.print("");
-		window_logger.print(&format!("Using log file {} in ~/{}.",&log_file_name,&LOG_DIRECTORY));
+		window_logger.print(&format!("Using log file {} in ~/{}.",&log_file_name,(Path::new(&MAIN_DIRECTORY).join(Path::new(&LOG_DIRECTORY))).display()));
 		window_logger.print("");
 		window_logger.print("Initializing client...");
+		let home_dir:PathBuf = match dirs::home_dir() {
+			None => PathBuf::from("."),
+			Some(dir) => dir,
+		};
+		let key_location:&str = arguments.value_of("KEY").expect("failed to get command line argument for identity filename");
+		let identity_path:PathBuf;
+		let absolute_identity_path:PathBuf = (Path::new("/").join(Path::new(&key_location))).to_owned();
+		let relative_identity_path:PathBuf = (Path::new(".").join(Path::new(&key_location))).to_owned();
+		let main_dir_identity_path:PathBuf = (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&KEY_DIRECTORY)).join(Path::new(&key_location))).to_owned();
+		if absolute_identity_path.exists() {
+			identity_path = absolute_identity_path;
+		} else if relative_identity_path.exists() {
+			identity_path = relative_identity_path;
+		} else if main_dir_identity_path.exists() {
+			identity_path = main_dir_identity_path;
+		} else {
+			endwin();
+			println!("checking for ID file at {}",absolute_identity_path.display());
+			println!("checking for ID file at {}",relative_identity_path.display());
+			println!("checking for ID file at {}",main_dir_identity_path.display());
+			eprintln!("Failed to open specified identity file: file not found.");
+			process::exit(1);
+		}
 		let mut client = match teamech::new_client(
-			&arguments.value_of("PADFILE").unwrap_or(""), 
+			identity_path.as_path(),
 			&arguments.value_of("ADDRESS").unwrap_or(""),
-			arguments.value_of("PORT").unwrap_or("6666").parse::<u16>().unwrap_or(6666),
-			arguments.value_of("localport").unwrap_or("0").parse::<u16>().unwrap_or(0),
+			arguments.value_of("port").unwrap_or("1413").parse::<u16>().unwrap_or(1413),
+			arguments.value_of("localport").unwrap_or("1612").parse::<u16>().unwrap_or(1612),
 			!arguments.is_present("ipv4")) {
 			Err(why) => {
 				endwin();
@@ -498,7 +525,6 @@ fn main() {
 			},
 			Ok(client) => client,
 		};
-		client.send_provide_hashes = true;
 		client.name = client_name.to_owned();
 		client.classes.push(client_class.to_owned());
 		window_logger.print("Client initialized.");
@@ -533,9 +559,6 @@ fn main() {
 			};
 			while let Some(event) = client.event_log.pop_front() {
 				match event.class {
-					teamech::EventClass::NameUpdate => (),
-					teamech::EventClass::ClassAdd => (),
-					teamech::EventClass::ClassRemove => (),
 					teamech::EventClass::TestResponse => { 
 						if event.parameter.len() > 0 {
 							let mut screen_line = 0;
@@ -562,18 +585,6 @@ fn main() {
 					},
 					teamech::EventClass::ClientSubscribe => {
 						window_logger.log("Subscribed to server.");
-						match client.set_name(&client_name) {
-							Err(why) => {
-								window_logger.log(&format!("-!- Failed to set client name - {}.",why));
-							},
-							Ok(_) => (),
-						};
-						match client.add_class(&client_class) {
-							Err(why) => {
-								window_logger.log(&format!("-!- Failed to set client class - {}.",why));
-							},
-							Ok(_) => (),
-						};
 					},
 					_ => window_logger.print(&event.to_string()),
 				};

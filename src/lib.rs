@@ -10,12 +10,12 @@ I. Network
 	A. UDP																		[ ]
 		1. Sending															[X]
 		2. Receiving														[X]
-		3. WAN Links/Holepunching								[ ]
+		3. WAN Links/Holepunching								[X]
 	B. TCP																		[ ]
 		1. Connection bootstrapping							[ ]
 		2. Out-of-band initiation								[ ]
-	C. Addresses															[ ]
-		1. IPv4																	[ ]
+	C. Addresses															[X]
+		1. IPv4																	[X]
 		2. IPv6																	[X]
 		3. DNS resolution												[X]
 II. Server																		
@@ -332,7 +332,7 @@ impl Event {
 				return format!("[{}] client list for {} [{}]: #{}",&timestamp,&self.identifier,&self.address,&self.contents);
 			},
 			EventClass::IdentityLoad => {
-				return format!("[{}] found identity: {} [hashed ID: {}]",&timestamp,&self.identifier,&self.parameter);
+				return format!("[{}] found identity: {} [{}]",&timestamp,&self.identifier,&self.parameter);
 			},
 			_ => return String::new(),
 		};
@@ -388,7 +388,7 @@ pub struct Client {
 	pub receive_queue:VecDeque<Packet>,									// incoming packets that need to be processed by the implementation
 	pub subscribed:bool,																// are we subscribed?
 	pub event_log:VecDeque<Event>,											// log of events produced by the client
-	pub last_number_matched:VecDeque<([u8;8],u64)>,								// tracks ack match-count reporting
+	pub last_number_matched:VecDeque<([u8;8],u64)>,			// tracks ack match-count reporting
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,	// packets that need to be resent if they aren't acknowledged
 	pub recent_packets:VecDeque<[u8;8]>,								// hashes of packets that were recently seen, to merge double-sends
 	pub max_recent_packets:usize,												// max number of recent packet hashes to store
@@ -399,7 +399,7 @@ pub struct Client {
 	pub send_provide_hashes:bool,
 }
 
-pub fn new_client(identity_path:&str,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
+pub fn new_client(identity_path:&Path,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
 	let server_ip_address:IpAddr = match IpAddr::from_str(&string_address) {
 		Ok(address) => address,
 		Err(_) => {
@@ -426,7 +426,7 @@ pub fn new_client(identity_path:&str,string_address:&str,remote_port:u16,local_p
 		},
 	};
 	let server_socket_address:SocketAddr = SocketAddr::new(server_ip_address,remote_port);
-	let new_identity:Identity = match load_identity_file(&Path::new(&identity_path)) {
+	let new_identity:Identity = match load_identity_file(&identity_path) {
 		Err(why) => return Err(why),
 		Ok(id) => id,
 	};
@@ -789,11 +789,7 @@ impl Client {
 				contents:String::from_utf8_lossy(&payload).to_string(),
 				timestamp:Local::now(),
 			});
-			if self.send_provide_hashes {
-				return Ok(bytes_to_hex(&packet_hash.to_vec()));
-			} else {
-				return Ok(String::new());
-			}
+			return Ok(bytes_to_hex(&packet_hash.to_vec()));
 		} else {
 			return Ok(String::new());
 		}
@@ -1222,7 +1218,7 @@ impl Server {
 						class:EventClass::IdentityLoad,
 						identifier:format!("@{}/#{}",&new_identity.name,&new_identity.classes[0]),
 						address:String::new(),
-						parameter:bytes_to_hex(&new_identity.tag),
+						parameter:bytes_to_hex(&new_identity.tag[..4].to_vec()),
 						contents:format!("{}",&file_path.display()),
 						timestamp:Local::now(),
 					});
@@ -1677,7 +1673,12 @@ impl Server {
 									timestamp:Local::now(),
 								});
 							},
-							(0x02,0) => (),
+							(0x02,8) => {
+								match self.send_packet(&vec![],&vec![0x06],&vec![],&received_packet.crypt_tag,&source_address) {
+									Err(why) => return Err(why),
+									Ok(_) => (),
+								};
+							},
 							(0x18,0) => {
 								let _ = self.subscribers.remove(&source_address);
 								match self.send_packet(&vec![],&vec![0x19],&vec![],&received_packet.crypt_tag,&source_address) {

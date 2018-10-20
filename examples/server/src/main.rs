@@ -79,7 +79,7 @@ fn main() {
 		(@arg name: -n --name +takes_value "Unique name to identify this server to other servers.")
 	).get_matches();
 	// parse values from arguments
-	let port_number:u16 = match arguments.value_of("port").unwrap_or("6666").parse::<u16>() {
+	let port_number:u16 = match arguments.value_of("port").unwrap_or("1413").parse::<u16>() {
 		Err(why) => {
 			eprintln!("Failed to parse given port number as an integer. See --help for help.");
 			eprintln!("{}",why);
