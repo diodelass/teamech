@@ -84,26 +84,22 @@ use std::thread::sleep;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
 use std::str::FromStr;
 
-// converts a signed 64-bit int into eight bytes
 fn i64_to_bytes(number:&i64) -> [u8;8] {
 	let mut bytes:[u8;8] = [0;8];
 	bytes.as_mut().write_i64::<LittleEndian>(*number).expect("failed to convert i64 to bytes");
 	return bytes;
 }
 
-// converts an unsigned 64-bit int into eight bytes
 fn u64_to_bytes(number:&u64) -> [u8;8] {
 	let mut bytes:[u8;8] = [0;8];
 	bytes.as_mut().write_u64::<LittleEndian>(*number).expect("failed to convert u64 to bytes");
 	return bytes;
 }
 
-// converts eight bytes into a signed 64-bit int
 fn bytes_to_i64(bytes:&[u8;8]) -> i64 {
 	return bytes.as_ref().read_i64::<LittleEndian>().expect("failed to convert bytes to i64"); 
 }
 
-// converts eight bytes into an unsigned 64-bit int
 fn bytes_to_u64(bytes:&[u8;8]) -> u64 {
 	return bytes.as_ref().read_u64::<LittleEndian>().expect("failed to convert bytes to u64");
 }
@@ -205,7 +201,8 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 
 pub enum EventClass {
 	Acknowledge,							// ack
-	Create,										// client/server object created
+	ServerCreate,							// server object created
+	ClientCreate,							// client object created
 	ServerSubscribe,					// server received subscription request
 	ClientSubscribe,					// client received subscription confirmation
 	ServerSubscribeFailure,		// subscription didn't happen because of an error
@@ -258,8 +255,11 @@ impl Event {
 				return format!("[{}] Acknowledgement of [{}] by {} [{}]",&timestamp,&self.contents,&self.identifier,
 					&self.address);
 			},
-			EventClass::Create => {
-				return format!("[{}] Initialization complete.",&timestamp);
+			EventClass::ServerCreate => {
+				return format!("[{}] Server initialization complete.",&timestamp);
+			},
+			EventClass::ClientCreate => {
+				return format!("[{}] Client initialization complete.",&timestamp);
 			},
 			EventClass::ServerSubscribe => {
 				return format!("[{}] Subscription requested by {} [{}] - {}",&timestamp,&self.identifier,&self.address,
@@ -333,6 +333,15 @@ impl Event {
 			},
 			EventClass::IdentityLoad => {
 				return format!("[{}] found identity: {} [{}]",&timestamp,&self.identifier,&self.parameter);
+			},
+			EventClass::NullEncrypt => {
+				return format!("[{}] WARNING: Sending unsecured message to {} due to missing keys!",&timestamp,&self.address);
+			},
+			EventClass::NullDecrypt => {
+				return format!("[{}] WARNING: Receiving unsecured message from {} due to missing keys!",&timestamp,&self.address);
+			},
+			EventClass::UnknownSender => {
+				return format!("[{}] invalid subscription request from {}",&timestamp,&self.address);
 			},
 			_ => return String::new(),
 		};
@@ -459,7 +468,7 @@ pub fn new_client(identity_path:&Path,string_address:&str,remote_port:u16,local_
 				send_provide_hashes:false,
 			};
 			created_client.event_log.push_back(Event {
-				class:EventClass::Create,
+				class:EventClass::ClientCreate,
 				identifier:String::from("local"),
 				address:String::new(),
 				parameter:String::new(),
@@ -1169,7 +1178,7 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				ack_fake_lag_ms:0,
 			};
 			created_server.event_log.push_back(Event {
-				class:EventClass::Create,
+				class:EventClass::ServerCreate,
 				identifier:String::from("local"),
 				address:String::new(),
 				parameter:String::new(),
@@ -1569,7 +1578,7 @@ impl Server {
 					}
 					let packet_crypt_tag:Vec<u8> = input_buffer[receive_length-8..receive_length].to_vec();
 					let sender_identity:Identity;
-					if let Some(id) = self.identities.get(&packet_crypt_tag) {
+					if let Some(id) = self.identities.clone().get(&packet_crypt_tag) {
 						sender_identity = id.clone();
 					} else {
 						self.ban_points.insert(source_address.ip(),current_ban_points+1);
@@ -1581,6 +1590,10 @@ impl Server {
 							contents:String::new(),
 							timestamp:Local::now(),
 						});
+						match self.send_packet(&vec![],&vec![0x15],&vec![],&vec![0;8],&source_address) {
+							Err(why) => return Err(why),
+							Ok(_) => (),
+						};
 						continue;
 					}
 					let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);

@@ -1,0 +1,9 @@
+[package]
+name = "keygen"
+version = "0.1.0"
+authors = ["Ellie D. <sporillium@gmail.com>"]
+
+[dependencies]
+byteorder = "1"
+rand = "0.3"
+clap = "2"
