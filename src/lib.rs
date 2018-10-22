@@ -214,6 +214,7 @@ pub enum EventClass {
 	ServerLink,								// current server initiated a link to another
 	ServerLinkFailure,				// attempt to link to another server failed
 	ServerUnlink,							// current server closed a link to another
+	ServerUnlinkFailure,			// attempt to unlink another server failed
 	ReceiveMessage,						// message delivered to the current endpoint (e.g. client)
 	ReceiveFailure,						// could not receive data
 	SendMessage,							// message sent by the current endpoint
@@ -1131,6 +1132,7 @@ pub struct Server {
 	pub name:String,
 	pub socket:UdpSocket,
 	pub identities:HashMap<Vec<u8>,Identity>,
+	pub identities_in_use:HashSet<Vec<u8>>,
 	pub subscribers:HashMap<SocketAddr,Subscription>,
 	pub linked_servers:HashMap<SocketAddr,ServerLink>,
 	pub max_subscribers:usize,
@@ -1160,6 +1162,7 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				socket:socket,
 				subscribers:HashMap::new(),
 				identities:HashMap::new(),
+				identities_in_use:HashSet::new(),
 				linked_servers:HashMap::new(),
 				max_subscribers:1024,
 				ban_points:HashMap::new(),
@@ -1357,6 +1360,8 @@ impl Server {
 					if received_packet.parameter.len() > 0 && &source_address == target_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
 							break;
+						} else if received_packet.parameter[0] == 0x19 {
+							return Err(io::Error::new(io::ErrorKind::InvalidData,"authorization rejected"));
 						} else if received_packet.parameter[0] == 0x15 {
 							return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"operation refused"));
 						} else {
@@ -1385,7 +1390,7 @@ impl Server {
 					class:EventClass::ServerLinkFailure,
 					identifier:String::from("server"),
 					address:String::from("local"),
-					parameter:String::new(),
+					parameter:format!("{}",&why),
 					contents:format!("{}",&remote_address),
 					timestamp:Local::now(),
 				});
@@ -1399,7 +1404,7 @@ impl Server {
 					class:EventClass::ServerLinkFailure,
 					identifier:String::from("server"),
 					address:String::from("local"),
-					parameter:String::new(),
+					parameter:format!("{}",&why),
 					contents:format!("{}",&remote_address),
 					timestamp:Local::now(),
 				});
@@ -1426,7 +1431,17 @@ impl Server {
 	// 
 	pub fn unlink_server(&mut self,crypt_tag:Vec<u8>,remote_address:&SocketAddr) -> Result<(),io::Error> {
 		match self.send_packet(&vec![],&vec![0x18],&vec![],&crypt_tag,&remote_address) {
-			Err(why) => return Err(why),
+			Err(why) => {
+				self.event_log.push_back(Event {
+					class:EventClass::ServerUnlinkFailure,
+					identifier:String::from("server"),
+					address:String::from("local"),
+					parameter:format!("{}",&why),
+					contents:format!("{}",&remote_address),
+					timestamp:Local::now(),
+				});
+				return Err(why);
+			},
 			Ok(_) => (),
 		};
 		for sub in self.linked_servers.clone().iter() {
@@ -1609,6 +1624,7 @@ impl Server {
 								unacked_packets:HashMap::new(),
 								delivery_failures:0,
 							});	
+							self.identities_in_use.insert(sender_identity.tag.clone());
 							match self.send_packet(&vec![],&vec![0x02],&vec![],&received_packet.crypt_tag,&source_address) {
 								Err(why) => return Err(why),
 								Ok(_) => (),
@@ -1693,7 +1709,9 @@ impl Server {
 								};
 							},
 							(0x18,0) => {
-								let _ = self.subscribers.remove(&source_address);
+								if let Some(cancelled_sub) = self.subscribers.remove(&source_address) {
+									let _ = self.identities_in_use.remove(&cancelled_sub.identity.tag);
+								}
 								match self.send_packet(&vec![],&vec![0x19],&vec![],&received_packet.crypt_tag,&source_address) {
 									Err(why) => return Err(why),
 									Ok(_) => (),
@@ -1750,7 +1768,9 @@ impl Server {
 					list_sub.unacked_packets.clear();
 				}
 				if !sub.identity.classes.contains(&"server".to_owned()) {
-					self.subscribers.remove(&sub.address);
+					if let Some(cancelled_sub) = self.subscribers.remove(&sub.address) {
+						let _ = self.identities_in_use.remove(&cancelled_sub.identity.tag);
+					}
 					match self.send_packet(&vec![],&vec![0x19],&vec![],&sub.identity.tag,&sub.address) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
@@ -1769,7 +1789,9 @@ impl Server {
 			}
 			if sub.delivery_failures > self.max_resend_failures {
 				if !sub.identity.classes.contains(&"server".to_owned()) {
-					self.subscribers.remove(&sub.address);
+					if let Some(cancelled_sub) = self.subscribers.remove(&sub.address) {
+						let _ = self.identities_in_use.remove(&cancelled_sub.identity.tag);
+					}
 					match self.send_packet(&vec![],&vec![0x19],&vec![],&sub.identity.tag,&sub.address) {
 						Err(why) => return Err(why),
 						Ok(_) => (),
