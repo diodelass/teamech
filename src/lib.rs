@@ -7,7 +7,7 @@ Feature Outline
 Functionality														Implemented
 
 I. Network
-	A. UDP																		[ ]
+	A. UDP																		[X]
 		1. Sending															[X]
 		2. Receiving														[X]
 		3. WAN Links/Holepunching								[X]
@@ -69,9 +69,6 @@ use tiny_keccak::Keccak;
 extern crate chrono;
 use chrono::prelude::*;
 
-extern crate byteorder;
-use byteorder::{LittleEndian,ReadBytesExt,WriteBytesExt};
-
 extern crate resolve;
 
 use std::io::prelude::*;
@@ -86,22 +83,34 @@ use std::str::FromStr;
 
 fn i64_to_bytes(number:&i64) -> [u8;8] {
 	let mut bytes:[u8;8] = [0;8];
-	bytes.as_mut().write_i64::<LittleEndian>(*number).expect("failed to convert i64 to bytes");
+	for x in 0..8 {
+		bytes[x] = ((*number >> (8*x)) & 0xFF) as u8;
+	}
 	return bytes;
 }
 
 fn u64_to_bytes(number:&u64) -> [u8;8] {
 	let mut bytes:[u8;8] = [0;8];
-	bytes.as_mut().write_u64::<LittleEndian>(*number).expect("failed to convert u64 to bytes");
+	for x in 0..8 {
+		bytes[x] = ((*number >> (8*x)) & 0xFF) as u8;
+	}
 	return bytes;
 }
 
 fn bytes_to_i64(bytes:&[u8;8]) -> i64 {
-	return bytes.as_ref().read_i64::<LittleEndian>().expect("failed to convert bytes to i64"); 
+	let mut number:i64 = 0;
+	for x in 0..8 {
+		number += (bytes[x] as i64) << (8*x)
+	}
+	return number;
 }
 
 fn bytes_to_u64(bytes:&[u8;8]) -> u64 {
-	return bytes.as_ref().read_u64::<LittleEndian>().expect("failed to convert bytes to u64");
+	let mut number:u64 = 0;
+	for x in 0..8 {
+		number += (bytes[x] as u64) << (8*x)
+	}
+	return number;
 }
 
 fn bytes_to_hex(v:&Vec<u8>) -> String {
