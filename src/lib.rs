@@ -1006,7 +1006,27 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(file) => file,
 		};
-		//let send_stream = match TcpStream::connect(&self.
+		let send_stream = match TcpStream::connect(&self.server_address) {
+			Err(why) => return Err(why),
+			Ok(socket) => socket,
+		};
+		'blockcycle loop {
+			let mut raw_buffer:[u8;16777216] = [0;16777216];
+			let nread:usize = match file.read(&mut raw_buffer) {
+				Err(why) => return Err(why),
+				Ok(n) => n,
+			};
+			if nread == 0 {
+				break;
+			}
+			self.identity.encrypt(&raw_buffer[0..nread].to_vec());
+			let mut transmit_buffer:Vec<u8> = u64_to_bytes(&nread as u64).to_vec();
+			transmit_buffer.append(&mut self.identity.encrypt(&raw_buffer[0..nread].to_vec()));
+			match send_stream.write_all(&transmit_buffer) {
+				Err(why) => return Err(why),
+				Ok(_) => (),
+			};
+		}
 	}
 
 } // impl Client
