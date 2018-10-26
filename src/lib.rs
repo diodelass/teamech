@@ -875,8 +875,7 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(t) => t,
 		};
-		match self.socket.set_read_timeout(Some(
-			Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
+		match self.socket.set_read_timeout(Some(Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
@@ -895,8 +894,12 @@ impl Client {
 					if received_packet.parameter.len() > 0 && source_address == self.server_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
 							break;
+						} else if received_packet.parameter[0] == 0x19 {
+							return Err(io::Error::new(io::ErrorKind::InvalidData,"authorization rejected"));
 						} else if received_packet.parameter[0] == 0x15 {
 							return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"operation refused"));
+						} else if received_packet.parameter[0] == 0x03 {
+							return Err(io::Error::new(io::ErrorKind::NotFound,"no destinations available"));
 						} else {
 							continue;
 						}
@@ -982,6 +985,28 @@ impl Client {
 		});
 		self.subscribed = false;
 		return Ok(());
+	}
+
+	pub fn send_file(&mut self,file_path:&Path,destination_expression:&str) {
+		let mut parameter = vec![0x0F];
+		parameter.append(&mut destination_expression.as_bytes().to_vec());
+		let filename:String = match file_path.file_name() {
+			None => return Err(io::Error::new(io::ErrorKind::NotFound,"could not extract filename from path")),
+			Some(string) => string.to_string_lossy().to_string(),
+		};
+		match self.send_packet(&parameter,&filename.as_bytes().to_vec()) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x06]) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		let file = match File::open(&file_path) {
+			Err(why) => return Err(why),
+			Ok(file) => file,
+		};
+		//let send_stream = match TcpStream::connect(&self.
 	}
 
 } // impl Client
@@ -1349,8 +1374,7 @@ impl Server {
 			Err(why) => return Err(why),
 			Ok(t) => t,
 		};
-		match self.socket.set_read_timeout(Some(
-			Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
+		match self.socket.set_read_timeout(Some(Duration::new((self.time_tolerance_ms/1000) as u64,(self.time_tolerance_ms%1000) as u32))) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
@@ -1373,6 +1397,8 @@ impl Server {
 							return Err(io::Error::new(io::ErrorKind::InvalidData,"authorization rejected"));
 						} else if received_packet.parameter[0] == 0x15 {
 							return Err(io::Error::new(io::ErrorKind::ConnectionRefused,"operation refused"));
+						} else if received_packet.parameter[0] == 0x03 {
+							return Err(io::Error::new(io::ErrorKind::NotFound,"no destinations available"));
 						} else {
 							continue;
 						}
