@@ -378,8 +378,8 @@ pub struct Packet {
 	pub timestamp:i64,			// when packet was received
 	pub source:SocketAddr,	// sending socket address
 	pub sender:Vec<u8>,			// sender's declared identifier (@name/#class)
-	pub crypt_tag:Vec<u8>,
-	pub crypt_null:bool,
+	pub crypt_tag:Vec<u8>,	// encryption identity tag (which key was used to decrypt)
+	pub crypt_null:bool,		// was this packet decrypted with the null key?
 	pub parameter:Vec<u8>,	// message parameter (e.g. routing expression)
 	pub payload:Vec<u8>,		// message payload
 }
@@ -891,6 +891,11 @@ impl Client {
 				},
 				Ok((receive_length,source_address)) => {
 					let received_packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
+					let mut packet_hash:[u8;8] = [0;8];
+					let mut sha3 = Keccak::new_sha3_256();
+					sha3.update(&received_packet.raw);
+					sha3.finalize(&mut packet_hash);
+					let _ = self.unacked_packets.remove(&packet_hash);
 					if received_packet.parameter.len() > 0 && source_address == self.server_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
 							break;
@@ -984,6 +989,57 @@ impl Client {
 			timestamp:Local::now(),
 		});
 		self.subscribed = false;
+		return Ok(());
+	}
+	
+	pub fn send_file(&mut self,file_path:&Path,routing_expression:&str) -> Result<(),io::Error> {
+		let mut parameter = vec![b'>'];
+		parameter.append(&mut routing_expression.as_bytes().to_vec());
+		let filename:String = match file_path.file_name() {
+			None => return Err(io::Error::new(io::ErrorKind::NotFound,"could not extract filename from path")),
+			Some(string) => string.to_string_lossy().to_string(),
+		};
+		let mut payload:Vec<u8> = vec![0x0F];
+		payload.append(&mut filename.as_bytes().to_vec());
+		match self.send_packet(&parameter,&payload) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		match self.get_response(&vec![0x06]) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		let mut file = match File::open(&file_path) {
+			Err(why) => return Err(why),
+			Ok(file) => file,
+		};
+		let mut file_buffer:[u8;400] = [0;400];
+		let mut read_position:u64 = 0;
+		loop {
+			match file.seek(io::SeekFrom::Start(read_position)) {
+				Err(why) => return Err(why),
+				Ok(_) => (),
+			};
+			let read_length:usize = match file.read(&mut file_buffer) {
+				Err(why) => return Err(why),
+				Ok(n) => n,
+			};
+			if read_length == 0 {
+				break;
+			}
+			match self.send_packet(&parameter,&file_buffer[0..read_length].to_vec()) {
+				Err(why) => return Err(why),
+				Ok(_) => (),
+			};
+			match self.get_response(&vec![0x06]) {
+				Err(why) => match why.kind() {
+					io::ErrorKind::NotFound => continue,
+					_ => return Err(why),
+				},
+				Ok(_) => (),
+			};
+			read_position += read_length as u64;
+		}
 		return Ok(());
 	}
 
@@ -1368,6 +1424,16 @@ impl Server {
 				},
 				Ok((receive_length,source_address)) => {
 					let received_packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
+					let mut packet_hash:[u8;8] = [0;8];
+					let mut sha3 = Keccak::new_sha3_256();
+					sha3.update(&received_packet.raw);
+					sha3.finalize(&mut packet_hash);
+					if let Some(sub) = self.subscribers.get_mut(&source_address) {
+						let _ = sub.unacked_packets.remove(&packet_hash);
+					}
+					if let Some(serv) = self.linked_servers.get_mut(&source_address) {
+						let _ = serv.unacked_packets.remove(&packet_hash);
+					}
 					if received_packet.parameter.len() > 0 && &source_address == target_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
 							break;
