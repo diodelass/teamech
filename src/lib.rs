@@ -234,6 +234,8 @@ pub enum EventClass {
 	TestResponse,							// reply to client with number of clients matched by a test message
 	RoutedMessage,						// message relayed to one or more matched clients
 	GlobalMessage,						// message matching all clients
+	RoutedFile,								// file relayed between clients
+	GlobalFile,								// file relayed to all clients
 	InvalidMessage,						// message whose signature or timestamp did not validate
 	NullDecrypt,							// message was decrypted using the null decryptor and is NOT secure
 	NullEncrypt,							// message was encrypted using the null encryptor and is NOT secure
@@ -320,12 +322,17 @@ impl Event {
 				return format!("[{}] Match test: [{}] [matches {}]",&timestamp,&self.parameter,&self.contents);
 			},
 			EventClass::RoutedMessage => {
-				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,
-					&self.address);
+				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
 			},
 			EventClass::GlobalMessage => {
 				return format!("[{}] [GLOBAL] {} -> [all clients]",&timestamp,&self.contents);
 			},
+			EventClass::RoutedFile => {
+				return format!("[{}] [FILE] [{}] {} -> {} [{}]",&timestamp,&self.parameter,&self.contents,&self.identifier,&self.address);
+			}
+			EventClass::GlobalFile => {
+				return format!("[{}] [FILE] [GLOBAL] {} -> {} [{}]",&timestamp,&self.contents,&self.identifier,&self.address);
+			}
 			EventClass::InvalidMessage => {
 				return format!("[{}] [SIGNATURE INVALID] {} [{}] -> [{}] {}",&timestamp,&self.identifier,&self.address,
 					&self.parameter,&self.contents);
@@ -406,6 +413,7 @@ pub struct Client {
 	pub identity:Identity,
 	pub receive_queue:VecDeque<Packet>,									// incoming packets that need to be processed by the implementation
 	pub subscribed:bool,																// are we subscribed?
+	pub receiving_file:String,
 	pub event_log:VecDeque<Event>,											// log of events produced by the client
 	pub last_number_matched:VecDeque<([u8;8],u64)>,			// tracks ack match-count reporting
 	pub unacked_packets:HashMap<[u8;8],UnackedPacket>,	// packets that need to be resent if they aren't acknowledged
@@ -415,7 +423,6 @@ pub struct Client {
 	pub uptime:i64,																			// time at which this client was created
 	pub time_tolerance_ms:i64,													// maximum time difference a packet can have from now
 	pub synchronous:bool,																// whether or not this client is synchronous
-	pub send_provide_hashes:bool,
 }
 
 pub fn new_client(identity_path:&Path,string_address:&str,remote_port:u16,local_port:u16,use_ipv6:bool) -> Result<Client,io::Error> {
@@ -467,6 +474,7 @@ pub fn new_client(identity_path:&Path,string_address:&str,remote_port:u16,local_
 				event_log:VecDeque::new(),
 				last_number_matched:VecDeque::new(),
 				subscribed:false,
+				receiving_file:String::new(),
 				unacked_packets:HashMap::new(),
 				recent_packets:VecDeque::new(),
 				max_recent_packets:32,
@@ -475,7 +483,6 @@ pub fn new_client(identity_path:&Path,string_address:&str,remote_port:u16,local_
 				uptime:Local::now().timestamp_millis(),
 				time_tolerance_ms:3000,
 				synchronous:true,
-				send_provide_hashes:false,
 			};
 			created_client.event_log.push_back(Event {
 				class:EventClass::ClientCreate,
@@ -722,6 +729,9 @@ impl Client {
 										timestamp:Local::now(),
 									});
 								},
+								(0x0F,_) => {
+
+								},
 								(_,_) => {
 									match self.send_packet(&vec![0x15],&packet_hash.to_vec()) {
 										Err(why) => return Err(why),
@@ -784,7 +794,7 @@ impl Client {
 			},
 			Ok(_) => (),
 		};
-		if parameter.len() > 0 && parameter[0] == b'>' {
+		if parameter.len() > 0 && [0x0F,0x0E,b'>'].contains(&&parameter[0]) {
 			let mut packet_hash:[u8;8] = [0;8];
 			let mut sha3 = Keccak::new_sha3_256();
 			sha3.update(&bottle);
@@ -993,15 +1003,13 @@ impl Client {
 	}
 	
 	pub fn send_file(&mut self,file_path:&Path,routing_expression:&str) -> Result<(),io::Error> {
-		let mut parameter = vec![b'>'];
+		let mut parameter = vec![0x0E];
 		parameter.append(&mut routing_expression.as_bytes().to_vec());
 		let filename:String = match file_path.file_name() {
 			None => return Err(io::Error::new(io::ErrorKind::NotFound,"could not extract filename from path")),
 			Some(string) => string.to_string_lossy().to_string(),
 		};
-		let mut payload:Vec<u8> = vec![0x0F];
-		payload.append(&mut filename.as_bytes().to_vec());
-		match self.send_packet(&parameter,&payload) {
+		match self.send_packet(&parameter,&filename.as_bytes().to_vec()) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
@@ -1013,6 +1021,7 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(file) => file,
 		};
+		parameter[0] = 0x0F;
 		let mut file_buffer:[u8;400] = [0;400];
 		let mut read_position:u64 = 0;
 		loop {
@@ -1581,7 +1590,7 @@ impl Server {
 			},
 			Ok(_) => (),
 		};
-		if parameter.len() > 0 && parameter[0] == b'>' {
+		if parameter.len() > 0 && [0x0F,0x0E,b'>'].contains(&&parameter[0]) {
 			let mut packet_hash:[u8;8] = [0;8];
 			let mut sha3 = Keccak::new_sha3_256();
 			sha3.update(&bottle);
@@ -1944,6 +1953,9 @@ impl Server {
 			});
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay invalid packet"));
 		}
+		if packet.parameter.len() < 1 {
+			return Ok(());
+		}
 		let mut packet_hash:[u8;8] = [0;8];
 		let mut sha3 = Keccak::new_sha3_256();
 		sha3.update(&packet.raw);
@@ -1962,19 +1974,30 @@ impl Server {
 		let send:bool = packet.payload.len() > 0;
 		let mut number_matched:u64 = 0;
 		for server_address in self.linked_servers.clone().keys() {
-			if &packet.source != server_address && packet.parameter.len() >= 1 && packet.parameter[0] == b'>' {
+			if &packet.source != server_address && packet.parameter.len() >= 1 && [0x0F,0x0E,b'>'].contains(&&packet.parameter[0]) {
 				match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&packet.crypt_tag,&server_address) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
-				self.event_log.push_back(Event {
-					class:EventClass::RoutedMessage,
-					identifier:String::new(),
-					address:format!("{}",&server_address),
-					parameter:bytes_to_hex(&packet_hash.to_vec()),
-					contents:String::from_utf8_lossy(&packet.payload).to_string(),
-					timestamp:Local::now(),
-				});
+				if packet.parameter[0] == b'>' {
+					self.event_log.push_back(Event {
+						class:EventClass::RoutedMessage,
+						identifier:String::new(),
+						address:format!("{}",&server_address),
+						parameter:bytes_to_hex(&packet_hash.to_vec()),
+						contents:String::from_utf8_lossy(&packet.payload).to_string(),
+						timestamp:Local::now(),
+					});
+				} else if packet.parameter[0] == 0x0E {
+					self.event_log.push_back(Event {
+						class:EventClass::RoutedFile,
+						identifier:String::new(),
+						address:format!("{}",&server_address),
+						parameter:bytes_to_hex(&packet_hash.to_vec()),
+						contents:String::from_utf8_lossy(&packet.payload).to_string(),
+						timestamp:Local::now(),
+					});
+				}
 			}
 		}
 		for sub in self.subscribers.clone().values() {
@@ -1983,7 +2006,7 @@ impl Server {
 			for class in sub.identity.classes.iter() {
 				subscriber_identifiers.push_str(&format!("#{} ",&class));
 			}
-			if packet.source != sub.address && packet.parameter.len() >= 1 && packet.parameter[0] == b'>'
+			if packet.source != sub.address && packet.parameter.len() >= 1 && [0x0F,0x0E,b'>'].contains(&&packet.parameter[0])
 				&& (wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&subscriber_identifiers) 
 				|| sub.identity.classes.contains(&"supervisor".to_owned())) {
 				if send {
@@ -1992,9 +2015,18 @@ impl Server {
 						Ok(_) => (),
 					};
 					let recipient:String = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
-					if packet.parameter.len() > 1 {
+					if packet.parameter[0] == b'>' {
 						self.event_log.push_back(Event {
 							class:EventClass::RoutedMessage,
+							identifier:recipient,
+							address:format!("{}",&sub.address),
+							parameter:bytes_to_hex(&packet_hash.to_vec()),
+							contents:String::from_utf8_lossy(&packet.payload).to_string(),
+							timestamp:Local::now(),
+						});
+					} else if packet.parameter[0] == 0x0E {
+						self.event_log.push_back(Event {
+							class:EventClass::RoutedFile,
 							identifier:recipient,
 							address:format!("{}",&sub.address),
 							parameter:bytes_to_hex(&packet_hash.to_vec()),
@@ -2060,14 +2092,25 @@ impl Server {
 				timestamp:Local::now(),
 			});
 		} else if packet.parameter.len() == 1 {
-			self.event_log.push_back(Event {
-				class:EventClass::GlobalMessage,
-				identifier:String::from_utf8_lossy(&packet.sender).to_string(),
-				address:format!("{}",&packet.source),
-				parameter:bytes_to_hex(&packet_hash.to_vec()),
-				contents:String::from_utf8_lossy(&packet.payload).to_string(),
-				timestamp:Local::now(),
-			});
+			if packet.parameter[0] == b'>' {
+				self.event_log.push_back(Event {
+					class:EventClass::GlobalMessage,
+					identifier:String::from_utf8_lossy(&packet.sender).to_string(),
+					address:format!("{}",&packet.source),
+					parameter:bytes_to_hex(&packet_hash.to_vec()),
+					contents:String::from_utf8_lossy(&packet.payload).to_string(),
+					timestamp:Local::now(),
+				});
+			} else if packet.parameter[0] == 0x0E {
+				self.event_log.push_back(Event {
+					class:EventClass::GlobalFile,
+					identifier:String::from_utf8_lossy(&packet.sender).to_string(),
+					address:format!("{}",&packet.source),
+					parameter:bytes_to_hex(&packet_hash.to_vec()),
+					contents:String::from_utf8_lossy(&packet.payload).to_string(),
+					timestamp:Local::now(),
+				});
+			}
 		}
 		return Ok(());
 	}
