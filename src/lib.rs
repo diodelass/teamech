@@ -208,6 +208,7 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 
 pub enum Event {
 	Acknowledge {
+		// server or client sent back an acknowledgement to something we transmitted.
 		sender:String,
 		address:SocketAddr,
 		hash:Vec<u8>,
@@ -215,73 +216,88 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	ServerCreate {
+		// server object instantiated.
 		timestamp:DateTime<Local>,
 	},
 	ClientCreate {
+		// client object instantiated.
 		timestamp:DateTime<Local>,
 	},
 	ServerSubscribe {
+		// we're a server, and a client just subscribed to us.
 		sender:String,
 		address:SocketAddr,
 		timestamp:DateTime<Local>,
 	},
 	ClientSubscribe {
+		// we're a client, and we just subscribed to a server.
 		address:SocketAddr,
 		timestamp:DateTime<Local>,
 	},
 	ServerSubscribeFailure {
+		// we're a server, and the subscription process for a client just failed for some reason.
 		sender:String,
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ClientSubscribeFailure {
+		// we're a client, and the subscription process for a client just failed for some reason.
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ServerUnsubscribe {
+		// we're a server, and a client has just been unsubscribed.
 		sender:String,
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ClientUnsubscribe {
+		// we're a client, and we've just been unsubscribed.
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ServerUnsubscribeFailure {
+		// we're a server, and something went wrong while trying to unsubscribe a client.
 		sender:String,
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ClientUnsubscribeFailure {
+		// we're a client, and something went wrong while unsubscribing.
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ServerLink {
+		// we're a server, and have just linked to another server.
 		address:SocketAddr,
 		timestamp:DateTime<Local>,
 	},
 	ServerLinkFailure {
+		// we're a server, and have failed to link to another server for some reason.
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ServerUnlink {
+		// we're a server, and we've just closed the link to another server.
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ServerUnlinkFailure {
+		// we're a server, and something went wrong during the process of unlinking from another server.
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	ReceiveMessage {
+		// we've just received a message.
 		sender:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -289,12 +305,15 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	ReceiveFileHeader {
+		// we're a client and we've just received the header for a file (the filename and the file length).
 		sender:String,
 		address:SocketAddr,
 		filename:String,
+		length:u64,
 		timestamp:DateTime<Local>,
 	},
 	ReceiveFileData {
+		// we're a client and we've just received a data segment from a file.
 		sender:String,
 		address:SocketAddr,
 		index:u64,
@@ -302,10 +321,12 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	ReceiveFailure {
+		// we've tried to receive a packet, but failed.
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	SendMessage {
+		// we've transmitted a packet.
 		destination:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -313,12 +334,14 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	SendFailure {
+		// we tried to send a packet, but it failed.
 		destination:String,
 		address:SocketAddr,
 		reason:String,
 		timestamp:DateTime<Local>,
 	},
 	DeadEndMessage {
+		// we're a server and we've just received a message whose routing expression doesn't match any clients.
 		sender:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -326,6 +349,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	HaltedMessage {
+		// we're a server and we've just received a packet that we've seen before, and won't resend.			
 		sender:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -333,6 +357,8 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	TestMessage {
+		// we're a server and we've just received a packet that has a routing expression, but no payload.
+		// this means that it's a test packet that shouldn't actually be relayed.
 		sender:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -340,6 +366,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	TestResponse {
+		// we've received a response to a test packet.
 		sender:String,
 		address:SocketAddr,
 		hash:Vec<u8>,
@@ -347,6 +374,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	RoutedMessage {
+		// we're a server and we've relayed a packet that was sent by a client.
 		destination:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -354,6 +382,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	RoutedFile {
+		// we're a server and we're starting to relay a file sent by a client.
 		destination:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -361,6 +390,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	InvalidMessage {
+		// we've received a message that isn't of the expected structure or has a bad signature.
 		sender:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -369,14 +399,18 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	NullDecrypt {
+		// we've decrypted a packet using the null key, which isn't secure. 
+		// this is done when two nodes need to talk to each other, but don't have any keys in common.
 		address:SocketAddr,
 		timestamp:DateTime<Local>,
 	},
 	NullEncrypt {
+		// we've encrypted a packet using the null key, which isn't secure.
 		address:SocketAddr,
 		timestamp:DateTime<Local>,
 	},
 	DeliveryRetry {
+		// we're a server and we're trying again to deliver a packet to a client.
 		destination:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -384,6 +418,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	DeliveryFailure {
+		// we're a server and we're giving up trying to deliver a message to a client who isn't responding.
 		destination:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -392,6 +427,7 @@ pub enum Event {
 		timestamp:DateTime<Local>,
 	},
 	ClientListRequest {
+		// we're a server and we're trying 
 		sender:String,
 		address:SocketAddr,
 		timestamp:DateTime<Local>,
@@ -855,12 +891,17 @@ impl Client {
 										Ok(_) => (),
 									};
 									match received_packet.parameter[0] {
-										0x0E => self.event_stream.push_back(Event::ReceiveFileHeader {
-											sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-											address:received_packet.source.clone(),
-											filename:String::from_utf8_lossy(&received_packet.payload).to_string(),
-											timestamp:Local::now(),
-										}),
+										0x0E => {
+											let mut length_bytes:[u8;8] = [0;8];
+											length_bytes.copy_from_slice(&received_packet.payload[..8]);
+											self.event_stream.push_back(Event::ReceiveFileHeader {
+												sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+												address:received_packet.source.clone(),
+												length:bytes_to_u64(&length_bytes),
+												filename:String::from_utf8_lossy(&received_packet.payload[8..]).to_string(),
+												timestamp:Local::now(),
+											});
+										},
 										0x0F => if received_packet.payload.len() > 8 {
 											let mut index_bytes:[u8;8] = [0;8];
 											index_bytes.copy_from_slice(&received_packet.payload[..8]);
@@ -1144,23 +1185,30 @@ impl Client {
 	}
 	
 	pub fn send_file(&mut self,file_path:&Path,routing_expression:&str) -> Result<(),io::Error> {
+		let mut file = match File::open(&file_path) {
+			Err(why) => return Err(why),
+			Ok(file) => file,
+		};
+		let file_metadata = match file.metadata() {
+			Err(why) => return Err(why),
+			Ok(metadata) => metadata,
+		};
 		let mut parameter = vec![0x0E];
 		parameter.append(&mut routing_expression.as_bytes().to_vec());
 		let filename:String = match file_path.file_name() {
 			None => return Err(io::Error::new(io::ErrorKind::NotFound,"could not extract filename from path")),
 			Some(string) => string.to_string_lossy().to_string(),
 		};
-		match self.send_packet(&parameter,&filename.as_bytes().to_vec()) {
+		let mut payload:Vec<u8> = Vec::new();
+		payload.append(&mut u64_to_bytes(&file_metadata.len()).to_vec());
+		payload.append(&mut filename.as_bytes().to_vec());
+		match self.send_packet(&parameter,&payload) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
 		match self.get_response(&vec![0x06]) {
 			Err(why) => return Err(why),
 			Ok(_) => (),
-		};
-		let mut file = match File::open(&file_path) {
-			Err(why) => return Err(why),
-			Ok(file) => file,
 		};
 		let sync_state:Option<Duration> = match self.socket.read_timeout() {
 			Err(why) => return Err(why),
@@ -2140,8 +2188,7 @@ impl Server {
 			let mut ack_payload:Vec<u8> = Vec::new();
 			ack_payload.append(&mut packet_hash.to_vec());
 			if send {
-				ack_payload.append(&mut u64_to_bytes(&0).to_vec());
-				sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
+				ack_payload.append(&mut u64_to_bytes(&1).to_vec());
 				match self.send_packet(&vec![],&vec![0x06],&ack_payload,&packet.crypt_tag,&packet.source) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
