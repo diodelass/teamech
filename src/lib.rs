@@ -174,23 +174,23 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 		// NOT
 		subpattern = subpattern.replace("!0","1");
 		subpattern = subpattern.replace("!1","0");
-		// OR
-		subpattern = subpattern.replace("0|1","1");
-		subpattern = subpattern.replace("1|0","1");
-		subpattern = subpattern.replace("1|1","1");
-		subpattern = subpattern.replace("0|0","0");
 		// AND
 		subpattern = subpattern.replace("0&1","0");
 		subpattern = subpattern.replace("1&0","0");
 		subpattern = subpattern.replace("1&1","1");
 		subpattern = subpattern.replace("0&0","0");
+		// Implied AND
+		subpattern = subpattern.replace(")(","&");
 		// XOR
 		subpattern = subpattern.replace("0^1","1");
 		subpattern = subpattern.replace("1^0","1");
 		subpattern = subpattern.replace("1^1","0");
 		subpattern = subpattern.replace("0^0","0");
-		// Implied AND
-		subpattern = subpattern.replace(")(","&");
+		// OR
+		subpattern = subpattern.replace("0|1","1");
+		subpattern = subpattern.replace("1|0","1");
+		subpattern = subpattern.replace("1|1","1");
+		subpattern = subpattern.replace("0|0","0");
 		// Parens
 		subpattern = subpattern.replace("(0)","0");
 		subpattern = subpattern.replace("(1)","1");
@@ -438,6 +438,11 @@ pub enum Event {
 		payload:String,
 		timestamp:DateTime<Local>,
 	},
+	ClientListEnd {
+		sender:String,
+		address:SocketAddr,
+		timestamp:DateTime<Local>,
+	},
 	IdentityLoad {
 		filename:String,
 		name:String,
@@ -462,7 +467,7 @@ impl Event {
 	pub fn to_string(&self) -> String {
 		match self {
 			Event::Acknowledge {timestamp,hash,sender,address,matches} => {
-				return format!("[{}] Acknowledgement of [{}] by {} [{}] ({} matches)",&timestamp,bytes_to_hex(&hash),&sender,&address,&matches);
+				return format!("[{}] Acknowledgement of [{}] by {} [{}] (x{})",&timestamp,bytes_to_hex(&hash),&sender,&address,&matches);
 			},
 			Event::ServerCreate {timestamp} => {
 				return format!("[{}] Server initialization complete.",&timestamp);
@@ -473,14 +478,26 @@ impl Event {
 			Event::ServerSubscribe {timestamp,sender,address} => {
 				return format!("[{}] Subscription requested by {} [{}]",&timestamp,&sender,&address);
 			},
+			Event::ServerSubscribeFailure {timestamp,sender,address,reason} => {
+				return format!("[{}] Failed to accept subscription request from {} [{}]: {}",&timestamp,&sender,&address,&reason);
+			},
 			Event::ServerUnsubscribe {timestamp,sender,address,reason} => {
 				return format!("[{}] Subscription closed for {} [{}] ({})",&timestamp,&sender,&address,&reason);
+			},
+			Event::ServerUnsubscribeFailure {timestamp,sender,address,reason} => {
+				return format!("[{}] Failed to close subscription for {} [{}]: {}",&timestamp,&sender,&address,&reason);
 			},
 			Event::ClientSubscribe {timestamp,address} => {
 				return format!("[{}] Subscribed to server at [{}]",&timestamp,&address);
 			},
+			Event::ClientSubscribeFailure {timestamp,address,reason} => {
+				return format!("[{}] Failed to subscribe to server at [{}]: {}",&timestamp,&address,&reason);
+			},
 			Event::ClientUnsubscribe {timestamp,address,reason} => {
 				return format!("[{}] Unsubscribed from server at [{}]: {}",&timestamp,&address,&reason);
+			},
+			Event::ClientUnsubscribeFailure {timestamp,address,reason} => {
+				return format!("[{}] Failed to unsubscribe from server at [{}]: {}",&timestamp,&address,&reason);
 			},
 			Event::ServerLink {timestamp,address} => {
 				return format!("[{}] Linked to server at [{}]",&timestamp,&address);
@@ -491,9 +508,18 @@ impl Event {
 			Event::ServerUnlink {timestamp,address,reason} => {
 				return format!("[{}] Unlinked from server at [{}] ({})",&timestamp,&address,&reason);
 			},
+			Event::ServerUnlinkFailure {timestamp,address,reason} => {
+				return format!("[{}] Failed to unlinke from server at [{}]: {}",&timestamp,&address,&reason);
+			},
 			Event::ReceiveMessage {timestamp,sender,address,parameter,payload} => {
 				return format!("[{}] {} [{}]: [{}] {}",&timestamp,&sender,&address,
 					String::from_utf8_lossy(&parameter),String::from_utf8_lossy(&payload));
+			},
+			Event::ReceiveFileHeader {timestamp,sender,address,filename,length} => {
+				return format!("[{}] Incoming file from {} [{}] - {} (length {})",&timestamp,&sender,&address,&filename,&length);
+			},
+			Event::ReceiveFileData {timestamp,sender,address,data,index} => {
+				return format!("[{}] Received file data from {} [{}] - {} bytes for position {}",&timestamp,&sender,&address,&data.len(),&index);
 			},
 			Event::ReceiveFailure {timestamp,reason} => {
 				return format!("[{}] Could not receive packet: {}",&timestamp,&reason);
@@ -516,6 +542,9 @@ impl Event {
 			Event::TestMessage {timestamp,sender,address,parameter,matches} => {
 				return format!("[{}] {} [{}] -> Match test: [{}] [matches {}]",&timestamp,&sender,&address,
 					String::from_utf8_lossy(&parameter),&matches);
+			},
+			Event::TestResponse {timestamp,sender,address,hash:_,matches} => {
+				return format!("[{}] Match test response from {} [{}]: matches {}",&timestamp,&sender,&address,&matches);
 			},
 			Event::RoutedMessage {timestamp,parameter,payload,destination,address} => {
 				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp,
@@ -542,19 +571,24 @@ impl Event {
 			Event::ClientListResponse {timestamp,sender,address,payload} => {
 				return format!("[{}] client list for {} [{}]: {}",&timestamp,&sender,&address,&payload);
 			},
+			Event::ClientListEnd {timestamp,sender,address} => {
+				return format!("[{}] end of client list from {} [{}]",&timestamp,&sender,&address);
+			},
 			Event::IdentityLoad {timestamp,filename,name,classes,tag} => {
 				return format!("[{}] found identity at {}: @{}/#{} [{}]",&timestamp,&filename,&name,&classes[0],bytes_to_hex(&tag));
 			},
+			Event::IdentityLoadFailure {timestamp,filename,reason} => {
+				return format!("[{}] failed to open identity file at {}: {}",timestamp,filename,reason);
+			},
 			Event::NullEncrypt {timestamp,address} => {
-				return format!("[{}] WARNING: Sending unsecured message to {} due to missing keys!",&timestamp,&address);
+				return format!("[{}] WARNING: sending unsecured message to {} due to missing keys!",&timestamp,&address);
 			},
 			Event::NullDecrypt {timestamp,address} => {
-				return format!("[{}] WARNING: Receiving unsecured message from {} due to missing keys!",&timestamp,&address);
+				return format!("[{}] WARNING: receiving unsecured message from {} due to missing keys!",&timestamp,&address);
 			},
 			Event::UnknownSender {timestamp,address} => {
-				return format!("[{}] invalid subscription request from {}",&timestamp,&address);
+				return format!("[{}] Alert: no identity found for message from {}",&timestamp,&address);
 			},
-			_ => return String::new(),
 		};
 	}
 
@@ -882,6 +916,25 @@ impl Client {
 										timestamp:Local::now(),
 									});
 								}
+								(0x04,0) => {
+									self.event_stream.push_back(Event::ClientListEnd {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										timestamp:Local::now(),
+									});
+								},
+								(0x04,_) => {
+									match self.send_packet(&vec![0x06],&vec![]) {
+										Err(why) => return Err(why),
+										Ok(_) => (),
+									};
+									self.event_stream.push_back(Event::ClientListResponse {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										payload:String::from_utf8_lossy(&received_packet.payload).to_string(),
+										timestamp:Local::now(),
+									});
+								},
 								(b'>',_)|(0x0E,_)|(0x0F,_) => {
 									let mut ack_payload:Vec<u8> = Vec::new();
 									ack_payload.append(&mut packet_hash.to_vec());
@@ -1965,6 +2018,55 @@ impl Server {
 									address:source_address.clone(),
 									timestamp:Local::now(),
 								});
+							},
+							(0x05,0) => {
+								let subscribers_snapshot = self.subscribers.clone();
+								if let Some(requesting_sub) = subscribers_snapshot.get(&source_address) {
+									if requesting_sub.identity.classes.contains(&String::from("supervisor")) {
+										self.event_stream.push_back(Event::ClientListRequest {
+											sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+											address:received_packet.source.clone(),
+											timestamp:Local::now(),
+										});
+										let mut sendfailures:u64 = 0;
+										'itersubs:for sub in subscribers_snapshot.values() {
+											'iterclasses:for class in sub.identity.classes.iter() {
+												'resend:loop {
+													let payload_string:String = format!("@{}/#{} [{}]",&sub.identity.name,&class,&source_address);
+													match self.send_packet(&vec![],&vec![0x04],&payload_string.as_bytes().to_vec(),&received_packet.crypt_tag,&source_address) {
+														Err(why) => return Err(why),
+														Ok(_) => (),
+													};
+													self.event_stream.push_back(Event::ClientListResponse {
+														sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+														address:received_packet.source.clone(),
+														payload:payload_string.clone(),
+														timestamp:Local::now(),
+													});
+													match self.get_response(&vec![0x06],&source_address) {
+														Err(why) => match why.kind() {
+															io::ErrorKind::NotFound => sendfailures += 1,
+															_ => return Err(why),
+														},
+														Ok(_) => break 'resend,
+													};
+													if sendfailures > self.max_resend_failures {
+														break 'itersubs;
+													}
+												}
+											}
+										}
+										match self.send_packet(&vec![],&vec![0x04],&vec![],&received_packet.crypt_tag,&source_address) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+									} else {
+										match self.send_packet(&vec![],&vec![0x15],&vec![],&received_packet.crypt_tag,&source_address) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+									}
+								}
 							},
 							(b'>',_) => {
 								if received_packet.valid {
