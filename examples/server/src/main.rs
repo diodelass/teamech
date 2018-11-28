@@ -1,7 +1,9 @@
-static VERSION:&str = "0.10.0 October 2018";
+static VERSION:&str = "0.11.0 November 2018";
 static MAIN_DIRECTORY:&str = ".teamech/";
 static LOG_DIRECTORY:&str = "logs/server/";
 static KEY_DIRECTORY:&str = "keys/server/";
+static ERROR_THRESHOLD:u64 = 10;
+static ERROR_DECAY_TIME:u64 = 5000;
 
 extern crate teamech;
 
@@ -54,6 +56,7 @@ impl Logger {
 		};
 	}
 
+	// A wrapper around log_to_file() that captures the errors and prints them to the console.
 	fn log(&self,logstring:&str) {
 		let log_file_name:String = self.log_file_path.to_str().unwrap_or("unknown").to_owned();
 		match self.log_to_file(&logstring) {
@@ -131,28 +134,49 @@ fn main() {
 		if server.identities.len() == 0 {
 			eprintln!("Error: no readable identities found in {}. No client subscriptions can be opened!",&identity_dir.display());
 		}
+		let mut error_count:u64 = 0;
+		let mut last_error:u64 = Local::now().timestamp_millis();
 		// processor loop does not break under ideal conditions and handles all standard functions.
 		'processor:loop {
 			// collect packets from clients, and append them to the server's receive_queue.
 			match server.get_packets() {
-				Err(why) => eprintln!("Failed to receive incoming packets: {}",why),
+				Err(why) => {
+					eprintln!("Failed to receive incoming packets: {}",why);
+					error_count += 1;
+					last_error = Local::now().timestamp_millis();
+				},
 				Ok(_) => (),
 			};
 			while let Some(packet) = server.receive_queue.pop_front() {
 				// relay every packet. the relay function will automatically refuse to send invalid packets.
 				match server.relay_packet(&packet) {
-					Err(why) => eprintln!("Failed to relay packet: {}",why),
+					Err(why) => { 
+						eprintln!("Failed to relay packet: {}",why);
+						error_count += 1;
+						last_error = Local::now().timestamp_millis();
+					},
 					Ok(_) => (),
 				};
 			}
 			match server.resend_unacked() {
-				Err(why) => eprintln!("Failed to resend unacknowledged packets: {}",why),
+				Err(why) => {
+					eprintln!("Failed to resend unacknowledged packets: {}",why);
+					error_count += 1;
+					last_error = Local::now().timestamp_millis();
+				},
 				Ok(_) => (),
 			};
-			while let Some(event) = server.event_log.pop_front() {
+			while let Some(event) = server.event_stream.pop_front() {
 				let event_string:String = event.to_string();
 				println!("{}",event_string);
 				logger.log(&event_string);
+			}
+			if error_count > ERROR_THRESHOLD {
+				break 'processor;
+			}
+			if Local::now().timestamp_millis() > last_error+ERROR_DECAY_TIME && error_count > 0 {
+				error_count -= 1;
+				last_error = Local::now().timestamp_millis();
 			}
 		}
 	}
