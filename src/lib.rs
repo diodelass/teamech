@@ -326,22 +326,6 @@ pub enum Event {
 		payload:Vec<u8>,
 		timestamp:Tm,
 	},
-	ReceiveFileHeader {
-		// we're a client and we've just received the header for a file (the filename and the file length).
-		sender:String,
-		address:SocketAddr,
-		filename:String,
-		length:u64,
-		timestamp:Tm,
-	},
-	ReceiveFileData {
-		// we're a client and we've just received a data segment from a file.
-		sender:String,
-		address:SocketAddr,
-		index:u64,
-		data:Vec<u8>,
-		timestamp:Tm,
-	},
 	ReceiveFailure {
 		// we've tried to receive a packet, but failed.
 		reason:String,
@@ -401,14 +385,6 @@ pub enum Event {
 		address:SocketAddr,
 		parameter:Vec<u8>,
 		payload:Vec<u8>,
-		timestamp:Tm,
-	},
-	RoutedFile {
-		// we're a server and we're starting to relay a file sent by a client.
-		destination:String,
-		address:SocketAddr,
-		parameter:Vec<u8>,
-		filename:String,
 		timestamp:Tm,
 	},
 	InvalidMessage {
@@ -542,12 +518,6 @@ impl Event {
 				return format!("[{}] {} [{}]: [{}] {}",&timestamp.rfc3339(),&sender,&address,
 					String::from_utf8_lossy(&parameter),String::from_utf8_lossy(&payload));
 			},
-			Event::ReceiveFileHeader {timestamp,sender,address,filename,length} => {
-				return format!("[{}] Incoming file from {} [{}] - {} (length {})",&timestamp.rfc3339(),&sender,&address,&filename,&length);
-			},
-			Event::ReceiveFileData {timestamp,sender,address,data,index} => {
-				return format!("[{}] Received file data from {} [{}] - {} bytes for position {}",&timestamp.rfc3339(),&sender,&address,&data.len(),&index);
-			},
 			Event::ReceiveFailure {timestamp,reason} => {
 				return format!("[{}] Could not receive packet: {}",&timestamp.rfc3339(),&reason);
 			},
@@ -577,9 +547,6 @@ impl Event {
 				return format!("[{}] [RELAY] [{}] {} -> {} [{}]",&timestamp.rfc3339(),
 					String::from_utf8_lossy(&parameter),String::from_utf8_lossy(&payload),&destination,&address);
 			},
-			Event::RoutedFile {timestamp,parameter,filename,destination,address} => {
-				return format!("[{}] [FILE] [{}] {} -> {} [{}]",&timestamp.rfc3339(),String::from_utf8_lossy(&parameter),&filename,&destination,&address);
-			}
 			Event::InvalidMessage {timestamp,reason,sender,address,parameter,payload} => {
 				return format!("[{}] [{}] {} [{}] -> [{}] {}",&timestamp.rfc3339(),&reason,&sender,&address,
 					String::from_utf8_lossy(&parameter),String::from_utf8_lossy(&payload));
@@ -942,7 +909,7 @@ impl Client {
 										timestamp:now_utc(),
 									});
 								},
-								(b'>',_)|(0x0E,_)|(0x0F,_) => {
+								(b'>',_) => {
 									let mut ack_payload:Vec<u8> = Vec::new();
 									ack_payload.append(&mut packet_hash.to_vec());
 									ack_payload.append(&mut u64_to_bytes(&1).to_vec());
@@ -950,37 +917,13 @@ impl Client {
 										Err(why) => return Err(why),
 										Ok(_) => (),
 									};
-									match received_packet.parameter[0] {
-										0x0E => {
-											let mut length_bytes:[u8;8] = [0;8];
-											length_bytes.copy_from_slice(&received_packet.payload[..8]);
-											self.event_stream.push_back(Event::ReceiveFileHeader {
-												sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-												address:received_packet.source.clone(),
-												length:bytes_to_u64(&length_bytes),
-												filename:String::from_utf8_lossy(&received_packet.payload[8..]).to_string(),
-												timestamp:now_utc(),
-											});
-										},
-										0x0F => if received_packet.payload.len() > 8 {
-											let mut index_bytes:[u8;8] = [0;8];
-											index_bytes.copy_from_slice(&received_packet.payload[..8]);
-											self.event_stream.push_back(Event::ReceiveFileData {
-												sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-												address:received_packet.source.clone(),
-												index:bytes_to_u64(&index_bytes),
-												data:received_packet.payload[8..].to_vec(),
-												timestamp:now_utc(),
-											});
-										},
-										_ => self.event_stream.push_back(Event::ReceiveMessage {
-											sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-											address:received_packet.source.clone(),
-											parameter:received_packet.parameter.clone(),
-											payload:received_packet.payload.clone(),
-											timestamp:now_utc(),
-										}),
-									};
+									self.event_stream.push_back(Event::ReceiveMessage {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										parameter:received_packet.parameter.clone(),
+										payload:received_packet.payload.clone(),
+										timestamp:now_utc(),
+									})
 								},
 								(_,_) => {
 									match self.send_packet(&vec![0x15],&packet_hash.to_vec()) {
@@ -1054,7 +997,7 @@ impl Client {
 			},
 			Ok(_) => (),
 		};
-		if parameter.len() > 0 && [0x0F,0x0E,b'>'].contains(&&parameter[0]) {
+		if parameter.len() > 0 && [b'>'].contains(&&parameter[0]) {
 			let mut packet_hash:[u8;8] = [0;8];
 			let mut sha3 = Keccak::new_sha3_256();
 			sha3.update(&bottle);
@@ -1135,7 +1078,7 @@ impl Client {
 		return Ok(());
 	}
 
-	pub fn get_response(&mut self,target_parameters:&Vec<u8>) -> Result<(),io::Error> {
+	pub fn get_response(&mut self,target_parameters:&Vec<u8>) -> Result<Vec<u8>,io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
 		let wait_start:i64 = milliseconds_now();
 		let original_timeout:Option<Duration>;
@@ -1147,6 +1090,7 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
+		let response_payload:Vec<u8>;
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
@@ -1166,6 +1110,7 @@ impl Client {
 					let _ = self.unacked_packets.remove(&packet_hash);
 					if received_packet.parameter.len() > 0 && source_address == self.server_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
+							response_payload = received_packet.payload.clone();
 							break;
 						} else if received_packet.parameter[0] == 0x19 {
 							return Err(io::Error::new(io::ErrorKind::InvalidData,"authorization rejected"));
@@ -1187,7 +1132,7 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		return Ok(());
+		return Ok(response_payload);
 	}
 
 	// transmits a subscription request packet. server will return 0x06 if
@@ -1250,74 +1195,6 @@ impl Client {
 		return Ok(());
 	}
 	
-	pub fn send_file(&mut self,file_path:&Path,routing_expression:&str) -> Result<(),io::Error> {
-		let mut file = match File::open(&file_path) {
-			Err(why) => return Err(why),
-			Ok(file) => file,
-		};
-		let file_metadata = match file.metadata() {
-			Err(why) => return Err(why),
-			Ok(metadata) => metadata,
-		};
-		let mut parameter = vec![0x0E];
-		parameter.append(&mut routing_expression.as_bytes().to_vec());
-		let filename:String = match file_path.file_name() {
-			None => return Err(io::Error::new(io::ErrorKind::NotFound,"could not extract filename from path")),
-			Some(string) => string.to_string_lossy().to_string(),
-		};
-		let mut payload:Vec<u8> = Vec::new();
-		payload.append(&mut u64_to_bytes(&file_metadata.len()).to_vec());
-		payload.append(&mut filename.as_bytes().to_vec());
-		match self.send_packet(&parameter,&payload) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		match self.get_response(&vec![0x06]) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		let sync_state:Option<Duration> = match self.socket.read_timeout() {
-			Err(why) => return Err(why),
-			Ok(state) => state,
-		};
-		match self.socket.set_read_timeout(Some(Duration::new(0,0))) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		parameter[0] = 0x0F;
-		let mut file_buffer:[u8;400] = [0;400];
-		let mut read_position:u64 = 0;
-		loop {
-			match file.seek(io::SeekFrom::Start(read_position)) {
-				Err(why) => return Err(why),
-				Ok(_) => (),
-			};
-			let read_length:usize = match file.read(&mut file_buffer) {
-				Err(why) => return Err(why),
-				Ok(n) => n,
-			};
-			if read_length == 0 {
-				break;
-			}
-			let mut payload:Vec<u8> = u64_to_bytes(&read_position).to_vec();
-			payload.append(&mut file_buffer[0..read_length].to_vec());
-			match self.send_packet(&parameter,&payload) {
-				Err(why) => return Err(why),
-				Ok(_) => (),
-			};
-			read_position += read_length as u64;
-			match self.get_packets() {
-				Err(why) => return Err(why),
-				Ok(_) => (),
-			};
-		}
-		match self.socket.set_read_timeout(sync_state) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		return Ok(());
-	}
-
 } // impl Client
 
 pub struct Decrypt {
@@ -1665,7 +1542,7 @@ impl Server {
 		}
 	}
 
-	pub fn get_response(&mut self,target_parameters:&Vec<u8>,target_address:&SocketAddr) -> Result<(),io::Error> {
+	pub fn get_response(&mut self,target_parameters:&Vec<u8>,target_address:&SocketAddr) -> Result<Vec<u8>,io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
 		let wait_start:i64 = milliseconds_now();
 		let original_timeout:Option<Duration>;
@@ -1677,6 +1554,7 @@ impl Server {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
+		let response_payload:Vec<u8>;
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
@@ -1701,6 +1579,7 @@ impl Server {
 					}
 					if received_packet.parameter.len() > 0 && &source_address == target_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
+							response_payload = received_packet.payload.clone();
 							break;
 						} else if received_packet.parameter[0] == 0x19 {
 							return Err(io::Error::new(io::ErrorKind::InvalidData,"authorization rejected"));
@@ -1722,7 +1601,7 @@ impl Server {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		return Ok(());
+		return Ok(response_payload);
 	}
 
 	pub fn link_server(&mut self,remote_address:&SocketAddr,crypt_tag:&Vec<u8>) -> Result<(),io::Error> {
@@ -1832,7 +1711,7 @@ impl Server {
 			},
 			Ok(_) => (),
 		};
-		if parameter.len() > 0 && [0x0F,0x0E,b'>'].contains(&&parameter[0]) {
+		if parameter.len() > 0 && [b'>'].contains(&&parameter[0]) {
 			let mut packet_hash:[u8;8] = [0;8];
 			let mut sha3 = Keccak::new_sha3_256();
 			sha3.update(&bottle);
@@ -2239,28 +2118,18 @@ impl Server {
 		let send:bool = packet.payload.len() > 0;
 		let mut number_matched:u64 = 0;
 		for server_address in self.linked_servers.clone().keys() {
-			if &packet.source != server_address && packet.parameter.len() >= 1 && [0x0F,0x0E,b'>'].contains(&&packet.parameter[0]) {
+			if &packet.source != server_address && packet.parameter.len() >= 1 && [b'>'].contains(&&packet.parameter[0]) {
 				match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&packet.crypt_tag,&server_address) {
 					Err(why) => return Err(why),
 					Ok(_) => (),
 				};
-				if packet.parameter[0] == b'>' {
-					self.event_stream.push_back(Event::RoutedMessage {
-						destination:String::from_utf8_lossy(&packet.sender).to_string(),
-						address:packet.source.clone(),
-						parameter:packet.parameter.clone(),
-						payload:packet.payload.clone(),
-						timestamp:now_utc(),
-					});
-				} else if packet.parameter[0] == 0x0E {
-					self.event_stream.push_back(Event::RoutedFile {
-						destination:String::from_utf8_lossy(&packet.sender).to_string(),
-						address:packet.source.clone(),
-						parameter:packet.parameter.clone(),
-						filename:String::from_utf8_lossy(&packet.payload).to_string(),
-						timestamp:now_utc(),
-					});
-				}
+				self.event_stream.push_back(Event::RoutedMessage {
+					destination:String::from_utf8_lossy(&packet.sender).to_string(),
+					address:packet.source.clone(),
+					parameter:packet.parameter.clone(),
+					payload:packet.payload.clone(),
+					timestamp:now_utc(),
+				});
 			}
 		}
 		for sub in self.subscribers.clone().values() {
@@ -2269,7 +2138,7 @@ impl Server {
 			for class in sub.identity.classes.iter() {
 				subscriber_identifiers.push_str(&format!("#{} ",&class));
 			}
-			if packet.source != sub.address && packet.parameter.len() >= 1 && [0x0F,0x0E,b'>'].contains(&&packet.parameter[0])
+			if packet.source != sub.address && packet.parameter.len() >= 1 && [b'>'].contains(&&packet.parameter[0])
 				&& (wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&subscriber_identifiers) 
 				|| sub.identity.classes.contains(&"supervisor".to_owned())) {
 				if send {
@@ -2278,23 +2147,13 @@ impl Server {
 						Ok(_) => (),
 					};
 					let recipient:String = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
-					if packet.parameter[0] == b'>' {
-						self.event_stream.push_back(Event::RoutedMessage {
-							destination:recipient,
-							address:sub.address.clone(),
-							parameter:packet.parameter.clone(),
-							payload:packet.payload.clone(),
-							timestamp:now_utc(),
-						});
-					} else if packet.parameter[0] == 0x0E {
-						self.event_stream.push_back(Event::RoutedFile {
-							destination:recipient,
-							address:sub.address.clone(),
-							parameter:packet.parameter.clone(),
-							filename:String::from_utf8_lossy(&packet.payload).to_string(),
-							timestamp:now_utc(),
-						});
-					}
+					self.event_stream.push_back(Event::RoutedMessage {
+						destination:recipient,
+						address:sub.address.clone(),
+						parameter:packet.parameter.clone(),
+						payload:packet.payload.clone(),
+						timestamp:now_utc(),
+					});
 					self.recent_packets.push_back(packet_hash.clone());
 					while self.recent_packets.len() > self.max_recent_packets {
 						let _ = self.recent_packets.pop_front();
