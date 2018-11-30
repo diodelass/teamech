@@ -1,19 +1,17 @@
-static VERSION:&str = "0.11.0 November 2018";
-static MAIN_DIRECTORY:&str = ".teamech/";
+static VERSION:&str = "0.11.1 November 2018";
+static MAIN_DIRECTORY:&str = "teamech/";
 static LOG_DIRECTORY:&str = "logs/server/";
 static KEY_DIRECTORY:&str = "keys/server/";
 static ERROR_THRESHOLD:u64 = 10;
-static ERROR_DECAY_TIME:u64 = 5000;
+static ERROR_DECAY_TIME:i64 = 5000;
 
 extern crate teamech;
 
 #[macro_use]
 extern crate clap;
 
-extern crate dirs;
-
-extern crate chrono;
-use chrono::prelude::*;
+extern crate time;
+use time::{now_utc,Timespec};
 
 use std::process;
 use std::path::{Path,PathBuf};
@@ -21,6 +19,11 @@ use std::io;
 use std::io::prelude::*;
 use std::fs;
 use std::fs::File;
+
+fn milliseconds_now() -> i64 {
+	let now:Timespec = now_utc().to_timespec();
+	return now.sec*1000 + (now.nsec as i64)/1000000;
+}
 
 struct Logger {
 	log_file_path:PathBuf,
@@ -90,13 +93,7 @@ fn main() {
 		},
 		Ok(n) => n,
 	};
-	let home_dir:PathBuf = match dirs::home_dir() {
-		None => {
-			eprintln!("Warning: Could not determine home directory. Using local directory instead.");
-			Path::new(".").to_owned()
-		},
-		Some(dir) => dir,
-	};
+	let home_dir:PathBuf = Path::new(".").to_owned();
 	let identity_dir:PathBuf = match arguments.value_of("keys") {
 		None => (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&KEY_DIRECTORY))).to_owned(),
 		Some(pathvalue) => Path::new(&pathvalue).to_owned(),
@@ -107,7 +104,7 @@ fn main() {
 		Some(pathvalue) => Path::new(&pathvalue).to_owned(),
 	};
 	let logger:Logger = Logger {
-		log_file_path:log_dir.join(Path::new(&format!("{}-teamech-server.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()))),
+		log_file_path:log_dir.join(Path::new(&format!("{}-teamech-server.log",now_utc().rfc3339()))),
 	};
 	let server_name:&str = arguments.value_of("name").unwrap_or("server");
 	// recovery loop handles basic stateful setup of server initially, and catches breaks from the processor loop.
@@ -135,7 +132,7 @@ fn main() {
 			eprintln!("Error: no readable identities found in {}. No client subscriptions can be opened!",&identity_dir.display());
 		}
 		let mut error_count:u64 = 0;
-		let mut last_error:u64 = Local::now().timestamp_millis();
+		let mut last_error:i64 = milliseconds_now();
 		// processor loop does not break under ideal conditions and handles all standard functions.
 		'processor:loop {
 			// collect packets from clients, and append them to the server's receive_queue.
@@ -143,7 +140,7 @@ fn main() {
 				Err(why) => {
 					eprintln!("Failed to receive incoming packets: {}",why);
 					error_count += 1;
-					last_error = Local::now().timestamp_millis();
+					last_error = milliseconds_now();
 				},
 				Ok(_) => (),
 			};
@@ -153,7 +150,7 @@ fn main() {
 					Err(why) => { 
 						eprintln!("Failed to relay packet: {}",why);
 						error_count += 1;
-						last_error = Local::now().timestamp_millis();
+						last_error = milliseconds_now();
 					},
 					Ok(_) => (),
 				};
@@ -162,7 +159,7 @@ fn main() {
 				Err(why) => {
 					eprintln!("Failed to resend unacknowledged packets: {}",why);
 					error_count += 1;
-					last_error = Local::now().timestamp_millis();
+					last_error = milliseconds_now();
 				},
 				Ok(_) => (),
 			};
@@ -174,9 +171,9 @@ fn main() {
 			if error_count > ERROR_THRESHOLD {
 				break 'processor;
 			}
-			if Local::now().timestamp_millis() > last_error+ERROR_DECAY_TIME && error_count > 0 {
+			if milliseconds_now() > last_error+ERROR_DECAY_TIME && error_count > 0 {
 				error_count -= 1;
-				last_error = Local::now().timestamp_millis();
+				last_error = milliseconds_now();
 			}
 		}
 	}

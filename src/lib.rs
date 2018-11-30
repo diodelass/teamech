@@ -1,4 +1,4 @@
-// Teamech v 0.11.0 November 2018
+// Teamech v 0.11.1 November 2018
 // License: AGPL v3
 
 /*
@@ -63,7 +63,7 @@ extern crate tiny_keccak;
 use tiny_keccak::Keccak;
 
 extern crate time;
-use time::{Timespec,Tm,get_time,now_utc};
+use time::{Timespec,Tm,now_utc};
 
 use std::io::prelude::*;
 use std::io;
@@ -124,7 +124,7 @@ fn get_rand_bytes(buffer:&mut [u8]) -> Result<(),io::Error> {
 }
 
 fn milliseconds_now() -> i64 {
-	let now:Timespec = get_time();
+	let now:Timespec = now_utc().to_timespec();
 	return now.sec*1000 + (now.nsec as i64)/1000000;
 }
 
