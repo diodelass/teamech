@@ -1,6 +1,11 @@
 // Teamech v 0.11.1 November 2018
 // License: AGPL v3
 
+// Editor Recommendations
+// - Font type: monospace
+// - Tab width: 2 chars
+// - Window width: 160 chars
+
 /*
 Feature Outline
 
@@ -10,11 +15,11 @@ I. Network
 	A. UDP																		[X]
 		1. Sending															[X]
 		2. Receiving														[X]
-		3. WAN Links/Holepunching								[X]
+		3. WAN Links/Holepunching								[-]
 	B. Addresses															[X]
 		1. IPv4																	[X]
 		2. IPv6																	[X]
-		3. DNS resolution												[X]
+		3. DNS resolution												[-]
 	C. Bulk data/file transfers								[X]
 II. Server																		
 	A. Subscriptions													[X]
@@ -25,11 +30,11 @@ II. Server
 		3. Banning															[X]
 		4. Identifiers													[X]
 			a. Names (unique)											[X]
-				i. Setting													[X]
-				ii. Changing												[X]
+				i. Setting													[-]
+				ii. Changing												[-]
 			b. Classes (nonunique)								[X]
-				i. Setting													[X]
-				ii. Unsetting												[X]
+				i. Setting													[-]
+				ii. Unsetting												[-]
 	B. Relaying																[X]
 		1. To all clients												[X]
 		2. To specific clients									[X]
