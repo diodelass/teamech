@@ -1,644 +1,716 @@
-static VERSION:&str = "0.10.0 October 2018";
-static MAIN_DIRECTORY:&str = ".teamech/";
-static LOG_DIRECTORY:&str = "logs/console/";
-static KEY_DIRECTORY:&str = "keys/console/";
 static PROMPT:&str = "[teamech]~ ";
-//static BAR:char = '━';
-//static BARSTOP_LEFT:char = '┫';
-//static BARSTOP_RIGHT:char = '┣';
-static BAR:char = '-';
-static BARSTOP_LEFT:char = '[';
-static BARSTOP_RIGHT:char = ']';
+static VERSION:&str = "0.12.0 December 2018";
+static THROTTLE:u64 = 0;
 
-extern crate teamech;
-
-extern crate pancurses;
-use pancurses::*;
-
-extern crate dirs;
+extern crate termion;
+use termion::raw::{IntoRawMode,RawTerminal};
+use termion::event::{Key,Event};
+use termion::input::{TermRead,Events};
+use termion::async_stdin;
+use termion::cursor;
+use termion::clear;
+use termion::color::*;
 
 #[macro_use]
 extern crate clap;
 
-extern crate chrono;
-use chrono::prelude::*;
+extern crate teamech;
 
-use std::env::set_var;
+use std::process::exit;
+use std::io::prelude::*;
+use std::io::{stdout,Stdout};
 use std::time::Duration;
 use std::thread::sleep;
-use std::process;
-use std::fs;
-use std::io::prelude::*;
-use std::io;
-use std::fs::File;
-use std::path::{Path,PathBuf};
-use std::collections::VecDeque;
+use std::net::IpAddr;
+//use std::fs::File;
+use std::path::Path;
 
-struct WindowLogger {
-	history:Vec<(String,String)>,
-	window:Window,
-	log_file_name:String,
-	console_line:Vec<char>,
-	line_history:Vec<Vec<char>>,
-	history_position:usize,
-	page_position:usize,
-	line_position:usize,
-	local_lines:VecDeque<Vec<u8>>,
-	sent_lines:VecDeque<(String,usize)>,
+struct Terminal {
+	stdin_events: Events<termion::AsyncReader>,
+	stdout: RawTerminal<Stdout>,
+	cursor_xpos: u16,
+	cursor_ypos: u16,
+	consoleline: Vec<char>,
+	consoleline_cursor_pos: u16,
+	consoleline_history_forward: Vec<Vec<char>>,
+	consoleline_history_backward: Vec<Vec<char>>,
+	line_number: u64,
+	saved_pos: (u16,u16),
 }
 
-fn new_windowlogger(log_file_name:&str) -> WindowLogger {
-	return WindowLogger {
-		history:Vec::new(),
-		window:initscr(),
-		log_file_name:log_file_name.to_owned(),
-		console_line:Vec::new(),
-		line_history:Vec::new(),
-		history_position:0,
-		page_position:0,
-		line_position:0,
-		local_lines:VecDeque::new(),
-		sent_lines:VecDeque::new(),
+fn init_term() -> Terminal {
+	return Terminal {
+		stdin_events: async_stdin().events(),
+		stdout: stdout().into_raw_mode().expect("could not engage raw mode on stdout"),
+		cursor_xpos: 1,
+		cursor_ypos: 1,
+		consoleline: Vec::new(),
+		consoleline_cursor_pos: 0,
+		consoleline_history_forward: Vec::new(),
+		consoleline_history_backward: Vec::new(),
+		line_number: 0,
+		saved_pos: (1,1),
 	};
 }
 
-impl WindowLogger {
-
-	// prints a line to the ncurses window - useful for condensing this common and lengthy invocation elsewhere.
-	fn print(&mut self,line:&str) {
-		self.history.push((line.to_owned(),String::new()));
-		let mut lines:Vec<String> = Vec::new();
-		let max_length:usize = (self.window.get_max_x() as usize)-8;
-		let mut temp_line:String = line.to_owned();
-		while temp_line.len() > max_length { 
-			lines.push(temp_line[0..max_length].to_owned());
-			temp_line = temp_line[max_length..temp_line.len()].to_owned();
-		}
-		lines.push(temp_line);
-		lines.reverse();
-		for newline in lines.iter() {
-			self.window.mv(self.window.get_max_y()-2,0);
-			self.window.clrtoeol();
-			self.window.addstr(&newline);
-			self.window.mv(0,0);
-			self.window.insdelln(-1);
-		}
-		let title:String = format!("{}{} Teamech Console {} {}",&BAR,&BARSTOP_LEFT,&VERSION,&BARSTOP_RIGHT);
-		self.window.mv(0,0);
-		self.window.addstr(&title);
-		if self.window.get_max_x() as usize > 21+&VERSION.len()+10 {
-			for _x in 0..(self.window.get_max_x() as usize)-&VERSION.len()-21 {
-				self.window.addstr(BAR.encode_utf8(&mut [0;4]));
+#[allow(dead_code)]
+impl Terminal {
+	fn get_cursor_pos(&mut self) -> (u16,u16) {
+		let _ = self.stdout.write("\x1b[6n".as_bytes());
+		let _ = self.stdout.flush();
+		sleep(Duration::from_micros(1000));
+		for _ in 0..100 {
+			if let Some(Event::Unsupported(v)) = self.get_event() {
+				let event_string:String = String::from_utf8_lossy(&v).to_string();
+				let coordinate_string:&str = event_string.trim_matches('\x1b').trim_matches('[').trim_matches('R');
+				let coordinates:Vec<&str> = coordinate_string.split(';').collect::<Vec<&str>>();
+				if coordinates.len() == 2 {
+					let ypos:u16 = match coordinates[0].parse::<u16>() {
+						Err(_) => {
+							self.console_println(coordinate_string);
+							1
+						},
+						Ok(n) => n,
+					};
+					let xpos:u16 = match coordinates[1].parse::<u16>() {
+						Err(_) => {
+							self.console_println(coordinate_string);
+							1
+						},
+						Ok(n) => n,
+					};
+					return (xpos,ypos);
+				}
 			}
+			sleep(Duration::from_micros(1000));
 		}
-		self.window.attrset(Attribute::Normal);
-		self.window.mv(self.window.get_max_y()-2,0);
-		self.window.clrtoeol();
-		for _x in 0..self.window.get_max_x() {
-			self.window.addstr(BAR.encode_utf8(&mut [0;4]));
-		}
-		self.window.attrset(Attribute::Normal);
-		self.window.mv(self.window.get_max_y()-1,0);
-		self.window.clrtoeol();
-		self.window.addstr(&PROMPT);
-		self.window.refresh();
+		return (0,0);
 	}
-
-	fn print_left(&mut self,line:&str,position:usize) {
-		if self.history.len() > position {
-			self.history[position].1 = line.to_owned();
-		}
-		if (position as i32)-(self.history_position as i32) > 0 
-			&& (position as i32)-(self.history_position as i32)-(self.history.len() as i32) < self.window.get_max_y()-2 {
-			self.window.mv(
-				self.window.get_max_y()-3+((position as i32)-(self.history.len() as i32)+1)+(self.history_position as i32),
-				self.window.get_max_x()-(line.len() as i32)-1
-			);
-			self.window.clrtoeol();
-			self.window.addstr(&line);
-			self.window.attrset(Attribute::Normal);
-			self.window.mv(self.window.get_max_y()-1,0);
-			self.window.clrtoeol();
-			self.window.mv(self.window.get_max_y(),0);
-			self.window.clrtoeol();
-			self.window.addstr(&PROMPT);
-			for ch in self.console_line.iter() {
-				self.window.addch(*ch);
-			}
-			self.window.refresh();
-		}
+	fn print_coords_debug(&mut self) {
+		let pos = (self.cursor_xpos,self.cursor_ypos);
+		let lh = self.console_lineheight();
+		let lr = self.console_linerow();
+		let cl = self.consoleline.len();
+		let cp = self.consoleline_cursor_pos;
+		self.save_pos();
+		self.move_to(1,1);
+		self.ins_str(&format!("{},{} {},{} {},{}    ",pos.0,pos.1,lh,lr,cl,cp));
+		self.restore_pos();
+		let _ = self.stdout.flush();
 	}
-
-	// prints a line to the ncurses window and also logs it.
-	fn log(&mut self,line:&str) {
-		self.silent_log(&line);
-		self.print(&format!("[{}] {}",Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),&line));
-	}
-
-	fn page(&mut self,page_position:&usize) {
-		if self.window.get_max_y() < 3 {
-			return;
-		}
-		let pagesize:usize = (self.window.get_max_y() as usize)-3;
-		let pagebottom:usize; 
-		if page_position <= &self.history.len() {
-			pagebottom = self.history.len()-page_position;
+	fn get_event(&mut self) -> Option<Event> {
+		if let Some(Ok(event)) = self.stdin_events.next() {
+			return Some(event);
 		} else {
-			return;
+			return None;
 		}
-		let pagetop:usize;
-		if pagesize <= pagebottom {
-			pagetop = pagebottom-pagesize;
+	}
+	fn ins_char(&mut self,c:char) {
+		let size = self.get_size();
+		let mut char_buffer:[u8;4] = [0;4];
+		let byte_len = c.encode_utf8(&mut char_buffer).len();
+		let _ = self.stdout.write(&char_buffer[0..byte_len]);
+		if self.cursor_xpos >= size.0 {
+			self.cursor_xpos = 1;
+			if self.cursor_ypos < size.1 {
+				self.cursor_ypos += 1;
+			} else {
+				let _ = self.stdout.write(b"\r\n");
+			}
+			let (x,y) = (self.cursor_xpos,self.cursor_ypos);
+			self.move_to(x,y);
 		} else {
-			pagetop = 0;
+			self.cursor_xpos += 1;
 		}
-		self.window.clear();
-		let mut subhistorytmp:Vec<(String,String)> = self.history[pagetop..pagebottom].to_vec();
-		if subhistorytmp.len() < pagesize {
-			subhistorytmp.reverse();
-			while subhistorytmp.len() < pagesize {
-				subhistorytmp.push((String::new(),String::new()));
-			}
-			subhistorytmp.reverse();
-		}
-		let mut subhistory:Vec<(String,String)> = Vec::new();
-		let maxlinelen:usize = (self.window.get_max_x() as usize)-7;
-		while let Some(mut subline) = subhistorytmp.pop() {
-			let mut tempstack:Vec<(String,String)> = Vec::new();
-			while subline.0.len() > maxlinelen {
-				tempstack.push((subline.0[0..maxlinelen].to_owned(),String::new()));
-				subline.0 = subline.0[maxlinelen..subline.0.len()].to_owned();
-			}
-			tempstack.push(subline);
-			tempstack.reverse();
-			subhistory.append(&mut tempstack);
-		}
-		while subhistory.len() >= (self.window.get_max_y() as usize)-2 {
-			let _ = subhistory.pop();
-		}
-		subhistory.reverse();
-		let title:String = format!("{}{} Teamech Console {} {}",&BAR,&BARSTOP_LEFT,&VERSION,&BARSTOP_RIGHT);
-		self.window.mv(0,0);
-		self.window.addstr(&title);
-		if self.window.get_max_x() as usize > VERSION.len()+21 {
-			for _x in 0..(self.window.get_max_x() as usize)-VERSION.len()-21 {
-				self.window.addstr(BAR.encode_utf8(&mut [0;4]));
-			}
-		}
-		self.window.attrset(Attribute::Normal);
-		for line in subhistory.iter() {
-			self.window.clrtoeol();
-			self.window.addstr(&line.0);
-			self.window.mv(self.window.get_cur_y(),self.window.get_max_x()-(line.1.len() as i32)-1);
-			self.window.addstr(&line.1);
-			self.window.mv(self.window.get_cur_y()+1,0);
-		}
-		for _x in 0..self.window.get_max_x() {
-			self.window.addstr(BAR.encode_utf8(&mut [0;4]));
-		}
-		self.window.attrset(Attribute::Normal);
-		self.window.mv(self.window.get_max_y()-1,0);
-		self.window.addstr(&PROMPT);
-		self.window.refresh();
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
 	}
-
-	// Accepts a path to a log file, and writes a line to it, generating a human- and machine-readable log.
-	fn log_to_file(&mut self,logstring:&str,timestamp:DateTime<Local>) -> Result<(),io::Error> {
-		let userhome:PathBuf = match dirs::home_dir() {
-			None => PathBuf::new(),
-			Some(pathbuf) => pathbuf,
-		};
-		let logdir:&Path = &userhome.as_path().join(&LOG_DIRECTORY);
-		match fs::create_dir_all(&logdir) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		let logpath:&Path = &logdir.join(&self.log_file_name);
-		let mut log_file = match fs::OpenOptions::new() 
-											.append(true)
-											.open(&logpath) {
-			Ok(file) => file,
-			Err(why) => match why.kind() {
-				io::ErrorKind::NotFound => match File::create(&logpath) {
-					Ok(file) => file,
-					Err(why) => return Err(why),
-				},
-				_ => return Err(why),
-			},
-		};
-		match writeln!(log_file,"[{}][{}] {}",timestamp.timestamp_millis(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring) {
-			Ok(_) => return Ok(()),
-			Err(why) => return Err(why),
-		};
+	fn ins_chars(&mut self,cs:&Vec<char>) {
+		for c in cs.iter() {
+			self.ins_char(*c);
+		}
 	}
-
-	// Error-handling wrapper for log_to_file() - rather than returning an error, prints the error
-	// message to the console and returns nothing.
-	fn silent_log(&mut self,logstring:&str) {
-		let log_file_name:String = self.log_file_name.clone();
-		let timestamp:DateTime<Local> = Local::now();
-		match self.log_to_file(&logstring,timestamp) {
-			Err(why) => {
-				self.print(&format!("ERROR: Failed to write to log file at {}: {}",&log_file_name,why));
-			},
-			Ok(()) => (),
-		};
+	fn ins_str(&mut self,s:&str) {
+		self.ins_chars(&s.chars().collect::<Vec<char>>());
 	}
-
-	fn handle_keys(&mut self) {
-		match self.window.getch() { 
-			Some(Input::Character(c)) => match c {
-				'\x0A' => { // ENTER
-					if self.page_position > 0 {
-						self.page_position = 0;
-						self.page(&0);
-					}
-					self.history_position = 0;
-					if self.line_history.len() == 0 || self.line_history[self.line_history.len()-1] != self.console_line {
-						self.line_history.push(self.console_line.clone());
-					}
-					if self.console_line.len() > 1 && self.console_line[0] == '`' {
-						let mut rawbytes:Vec<u8> = vec![b'`'];
-						let mut hexchars:Vec<char> = Vec::new();
-						for ch in self.console_line[1..].iter() {
-							if ['0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'].contains(&ch) {
-								hexchars.push(*ch);
-							}
-						}
-						for chs in hexchars.chunks(2) {
-							let byte = match u8::from_str_radix(&chs.iter().collect::<String>(),16) {
-								Err(_) => return (),
-								Ok(x) => x,
-							};
-							rawbytes.push(byte);
-						}
-						self.local_lines.push_back(rawbytes);
-					} else {
-						self.local_lines.push_back(self.console_line.iter().collect::<String>().as_bytes().to_vec());
-					}
-					self.console_line = Vec::new();
-					self.line_position = 0;
-				},
-				'\x7F'|'\x08' => { // DEL
-					if self.line_position > 0 {
-						let _ = self.console_line.remove(self.line_position-1); 
-						self.window.mv(self.window.get_cur_y(),self.window.get_cur_x()-1);
-						self.window.delch();
-						self.line_position -= 1;
-						self.window.refresh();
-					}
-				},
-				'\x1B' => { // ESCAPE
-					self.local_lines.push_back(b"/quit".to_vec());
-				},
-				c => {
-					if self.line_position == self.console_line.len() {
-						self.window.addstr(c.to_string());
-						self.console_line.push(c);
-					} else {
-						self.window.insch(c);
-						self.console_line.insert(self.line_position,c);
-						self.window.mv(self.window.get_cur_y(),self.window.get_cur_x()+1);
-					}
-					self.line_position += 1;
-					self.window.refresh();
-				},
-			},
-			Some(Input::KeyBackspace) => {
-				if self.line_position > 0 {
-					let _ = self.console_line.remove(self.line_position-1); 
-					self.line_position -= 1;
-				}	
-				while ((self.line_position+PROMPT.len()) as i32) < self.window.get_cur_x() {
-					self.window.mv(self.window.get_cur_y(),self.window.get_cur_x()-1);
-					self.window.delch();
-					self.window.refresh();
-				}
-			}
-			Some(Input::KeyUp) => {
-				if self.history_position == 0 && self.console_line.len() > 0 {
-					self.line_history.push(self.console_line.clone());
-				}
-				if self.history_position < self.line_history.len() {
-					self.history_position += 1;
-					self.console_line = self.line_history[self.line_history.len()-self.history_position].to_vec();
-					self.window.mv(self.window.get_cur_y(),0);
-					self.window.clrtoeol();
-					self.window.addstr(&PROMPT);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-					self.line_position = self.console_line.len();
-					self.window.refresh();
-				}
-			},
-			Some(Input::KeyDown) => {
-				if self.history_position > 1 {
-					self.history_position -= 1;
-					self.console_line = self.line_history[self.line_history.len()-self.history_position].to_vec();
-				} else if self.console_line.len() > 0 {
-					if self.history_position == 0 {
-						self.line_history.push(self.console_line.clone());
-					}
-					self.console_line = Vec::new();
-					self.history_position = 0;
-				}
-				self.window.mv(self.window.get_cur_y(),0);
-				self.window.clrtoeol();
-				self.window.addstr(&PROMPT);
-				for ch in self.console_line.iter() {
-					self.window.addch(*ch);
-				}
-				self.line_position = self.console_line.len();
-				self.window.refresh();
-			},
-			Some(Input::KeyLeft) => {
-				if self.line_position > 0 {
-					self.line_position -= 1;
-					if self.line_position < self.window.get_max_x() as usize {
-						self.window.mv(self.window.get_cur_y(),self.window.get_cur_x()-1);
-					}
-				}
-				self.window.refresh();
-			},
-			Some(Input::KeyRight) => {
-				if self.line_position < self.console_line.len() as usize {
-					self.line_position += 1;
-					if self.line_position < self.window.get_max_x() as usize{
-						self.window.mv(self.window.get_cur_y(),self.window.get_cur_x()+1);
-					}
-				}
-				self.window.refresh();
-			},
-			Some(Input::KeyHome) => {
-				self.window.mv(self.window.get_cur_y(),PROMPT.len() as i32);
-				self.line_position = 0;
-				self.window.refresh();
-			},
-			Some(Input::KeyEnd) => {
-				if PROMPT.len()+self.line_position >= self.window.get_max_x() as usize {
-					self.window.mv(self.window.get_cur_y(),self.window.get_max_x()-1);
-				} else {
-					self.window.mv(self.window.get_cur_y(),(PROMPT.len()+self.console_line.len()) as i32);
-				}
-				self.line_position = self.console_line.len();
-				self.window.refresh();
-			},
-			Some(Input::KeyResize) => {
-				let page_position_snapshot:usize = self.page_position;
-				self.page(&page_position_snapshot);
-				for ch in self.console_line.iter() {
-					self.window.addch(*ch);
-				}
-			},
-			Some(Input::KeyPPage)|Some(Input::KeySPrevious) => {
-				if self.page_position < self.history.len()-10 {
-					self.page_position += 10;
-					let page_position_snapshot:usize = self.page_position;
-					self.page(&page_position_snapshot);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-				} else {
-					self.page_position = self.history.len();
-					let page_position_snapshot:usize = self.page_position;
-					self.page(&page_position_snapshot);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-				}
-			},
-			Some(Input::KeyNPage)|Some(Input::KeySNext) => {
-				if self.page_position > 10 {
-					self.page_position -= 10;
-					let page_position_snapshot:usize = self.page_position;
-					self.page(&page_position_snapshot);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-				} else {
-					self.page_position = 0;
-					self.page(&0);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-				}
-			},
-			Some(Input::KeySR) => { // Shift-Up
-				if self.page_position < self.history.len() {
-					self.page_position += 1;
-					let page_position_snapshot:usize = self.page_position;
-					self.page(&page_position_snapshot);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-				}
-			}
-			Some(Input::KeySF) => { // Shift-Down
-				if self.page_position > 0 {
-					self.page_position -= 1;
-					let page_position_snapshot:usize = self.page_position;
-					self.page(&page_position_snapshot);
-					for ch in self.console_line.iter() {
-						self.window.addch(*ch);
-					}
-				}
-			}
-			Some(x) => self.print(&format!("-!- unknown keypress: {:?}",x)),
-			None => (),
-		};
+	fn ins_str_novis(&mut self,s:&str) {
+		let _ = self.stdout.write(&s.as_bytes());
+		let _ = self.stdout.flush();
 	}
-
-} // impl WindowLogger
+	fn move_left(&mut self,n:u16) {
+		let size = self.get_size();
+		let pos = (self.cursor_xpos,self.cursor_ypos);
+		if pos.0 <= n {
+			if pos.0 > 1 {
+				let _ = self.stdout.write(&format!("{}",cursor::Left(pos.0-1)).as_bytes());
+			}
+			self.set_xpos(size.0);
+			self.move_up(1);
+			if pos.0 < n {
+				let _ = self.stdout.write(&format!("{}",cursor::Left(n-pos.0)).as_bytes());
+				self.cursor_xpos -= n-pos.0;
+			}
+		} else {
+			let _ = self.stdout.write(&format!("{}",cursor::Left(n)).as_bytes());
+			self.cursor_xpos -= n;
+		}
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(10));
+	}
+	fn move_right(&mut self,n:u16) {
+		let size = self.get_size();
+		let pos = (self.cursor_xpos,self.cursor_ypos);
+		if pos.0+n > size.0 {
+			if pos.0 < size.0 {
+				let _ = self.stdout.write(&format!("{}",cursor::Right(size.0-pos.0)).as_bytes());
+			}
+			self.set_xpos(1);
+			if pos.1 < size.1 {
+				self.move_down(1);
+			}
+			if pos.0+n > size.0+1 {
+				let _ = self.stdout.write(&format!("{}",cursor::Right(n-(size.0-pos.0)-1)).as_bytes());
+				self.cursor_xpos += n-(size.0-pos.0);
+			}
+		} else {
+			let _ = self.stdout.write(&format!("{}",cursor::Right(n)).as_bytes());
+			self.cursor_xpos += n;
+		}
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
+	}
+	fn move_down(&mut self,n:u16) {
+		let _ = self.stdout.write(&format!("{}",cursor::Down(n)).as_bytes());
+		let max_y = self.get_size().1;
+		if self.cursor_ypos+n < max_y {
+			self.cursor_ypos += n;
+		} else {
+			self.cursor_ypos = max_y;
+		}
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
+	}
+	fn move_up(&mut self,n:u16) {
+		let _ = self.stdout.write(&format!("{}",cursor::Up(n)).as_bytes());
+		if self.cursor_ypos > n {
+			self.cursor_ypos -= n;
+		} else {
+			self.cursor_ypos = 1;
+		}
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
+	}
+	fn move_to(&mut self,x:u16,y:u16) {
+		let _ = self.stdout.write(&format!("{}",cursor::Goto(x,y)).as_bytes());
+		self.cursor_xpos = x;
+		self.cursor_ypos = y;
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
+	}
+	fn set_xpos(&mut self,x:u16) {
+		let ypos = self.cursor_ypos;
+		self.move_to(x,ypos);
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
+	}
+	fn set_ypos(&mut self,y:u16) {
+		let xpos = self.cursor_xpos;
+		self.move_to(xpos,y);
+		let _ = self.stdout.flush();
+		sleep(Duration::from_millis(THROTTLE));
+	}
+	fn save_pos(&mut self) {
+		self.saved_pos = (self.cursor_xpos,self.cursor_ypos);
+	}
+	fn restore_pos(&mut self) {
+		let saved_pos = self.saved_pos;
+		self.move_to(saved_pos.0,saved_pos.1);
+	}
+	fn get_xpos(&self) -> u16 {
+		return self.cursor_xpos;
+	}
+	fn get_ypos(&self) -> u16 {
+		return self.cursor_ypos;
+	}
+	fn get_size(&self) -> (u16,u16) {
+		return termion::terminal_size().expect("failed to get terminal size");
+	}
+	fn go_home(&mut self) {
+		let max_y = self.get_size().1;
+		self.move_to(1,max_y);
+		self.cursor_xpos = 1;
+		self.cursor_ypos = max_y;
+		for _ in 1..self.console_lineheight() {
+			self.move_up(1);
+		}
+	}
+	fn clear_line(&mut self) {
+		let _ = self.stdout.write(&format!("{}",clear::CurrentLine).as_bytes());
+	}
+	fn clear_to_eol(&mut self) {
+		let _ = self.stdout.write(&format!("{}",clear::AfterCursor).as_bytes());
+	}
+	fn clear_window(&mut self) {
+		let _ = self.stdout.write(&format!("{}",clear::All).as_bytes());
+	}
+	fn console_lineheight(&mut self) -> u16 {
+		let line_len:u16 = (PROMPT.len() + self.consoleline.len()) as u16;
+		let term_width:u16 = self.get_size().0;
+		if term_width == 0 {
+			return 1;
+		}
+		return (line_len + term_width - 1)/term_width;
+	}
+	fn console_linerow(&mut self) -> u16 {
+		let term_width:u16 = self.get_size().0;
+		let true_pos:u16 = self.consoleline_cursor_pos + PROMPT.len() as u16;
+		if term_width == 0 {
+			return 1;
+		}
+		return (true_pos + term_width - 1)/term_width;
+	}
+	fn console_set_prompt(&mut self) {
+		self.console_end();
+		for _ in 1..self.console_linerow() {
+			self.clear_line();
+			self.move_up(1);
+		}
+		self.clear_line();
+		self.set_xpos(1);
+		self.ins_str_novis(&format!("{}",Fg(Green)));
+		self.ins_str(&PROMPT);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		let _ = self.stdout.flush();
+	}
+	fn console_ins_char(&mut self,c:char) {
+		let mut cl:Vec<char> = self.consoleline.clone();
+		let mut cl_pos:u16 = self.consoleline_cursor_pos;
+		cl.insert(cl_pos as usize,c);
+		cl_pos += 1;
+		self.consoleline = cl.clone();
+		if cl_pos == cl.len() as u16 {
+			self.ins_char(c);
+		} else {
+			//self.console_set_prompt();
+			self.ins_char(c);
+			self.clear_to_eol();
+			self.save_pos();
+			for _ in self.console_linerow()..self.console_lineheight() {
+				self.move_down(1);
+				self.clear_line();
+			}
+			self.restore_pos();
+			self.ins_chars(&cl[cl_pos as usize..].to_vec());
+			self.move_left(cl.len() as u16 - cl_pos);
+			//self.go_home();
+			//self.move_right(PROMPT.len() as u16 + cl_pos);
+		}
+		self.consoleline_cursor_pos = cl_pos;
+		let _ = self.stdout.flush();
+	}
+	fn console_feed(&mut self) -> String {
+		let cl:Vec<char> = self.consoleline.clone();
+		while let Some(line) = self.consoleline_history_forward.pop() {
+			self.consoleline_history_backward.push(line);
+		}
+		if self.consoleline_history_backward.last() != Some(&cl) && cl.len() != 0 {
+			self.consoleline_history_backward.push(cl.clone());
+		}
+		self.console_set_prompt();
+		self.consoleline = Vec::new();
+		self.consoleline_cursor_pos = 0;
+		let _ = self.stdout.flush();
+		return cl.iter().collect::<String>();
+	}
+	fn console_println(&mut self,s:&str) {
+		let cl:Vec<char> = self.consoleline.clone();
+		for _ in 1..self.console_linerow() {
+			self.clear_line();
+			self.move_up(1);
+		}
+		self.clear_line();
+		self.go_home();
+		self.ins_str(&s);
+		self.ins_str("\r\n");
+		self.line_number += 1;
+		self.console_set_prompt();
+		self.ins_chars(&cl);
+		self.go_home();
+		self.move_right((cl.len()+PROMPT.len()) as u16);
+		let _ = self.stdout.flush();
+	}
+	fn console_startl(&mut self,s:&str) {
+		for _ in 1..self.console_linerow() {
+			self.clear_line();
+			self.move_up(1);
+		}
+		self.clear_line();
+		self.go_home();
+		self.ins_str(&s);
+	}
+	fn console_endl(&mut self) {
+		let cl:Vec<char> = self.consoleline.clone();
+		self.ins_str("\r\n");
+		self.line_number += 1;
+		self.console_set_prompt();
+		self.ins_chars(&cl);
+		self.go_home();
+		self.move_right((cl.len()+PROMPT.len()) as u16);
+		let _ = self.stdout.flush();
+	}
+	fn console_error(&mut self,s:&str) {
+		self.console_startl("");
+		self.ins_str_novis(&format!("{}",Fg(Red)));
+		self.ins_str("-!- Error: ");
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str(&s);
+		self.console_endl();
+	}
+	fn console_warning(&mut self,s:&str) {
+		self.console_startl("");
+		self.ins_str_novis(&format!("{}",Fg(Yellow)));
+		self.ins_str("-!- Warning: ");
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str(&s);
+		self.console_endl();
+	}
+	fn console_info(&mut self,s:&str) {
+		self.console_startl("");
+		self.ins_str_novis(&format!("{}",Fg(Cyan)));
+		self.ins_str("-*- ");
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str(&s);
+		self.console_endl();
+	}
+	fn console_version(&mut self) {
+		self.console_startl("");
+		self.ins_str_novis(&format!("{}",Fg(Green)));
+		self.ins_str("Teamech Console ");
+		self.ins_str_novis(&format!("{}",Fg(Blue)));
+		self.ins_str(&VERSION);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.console_endl();
+	}
+	fn console_netevent(&mut self,date:&str,time:&str,contents:&str) {
+		self.console_startl("[");
+		self.ins_str_novis(&format!("{}",Fg(LightMagenta)));
+		self.ins_str(&date);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str("] [");
+		self.ins_str_novis(&format!("{}",Fg(LightBlue)));
+		self.ins_str(&time);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str("] ");
+		self.ins_str(&contents);
+		self.console_endl();
+	}
+	fn console_backspace(&mut self) {
+		if self.consoleline_cursor_pos > 0 {
+			let _ = self.consoleline.remove(self.consoleline_cursor_pos as usize - 1);
+			self.move_left(1);
+			self.consoleline_cursor_pos -= 1;
+			self.clear_to_eol();
+			if self.consoleline_cursor_pos < self.consoleline.len() as u16 {
+				let remaining_chars = &self.consoleline[self.consoleline_cursor_pos as usize..].to_vec();
+				self.ins_chars(&remaining_chars);
+				self.move_left(remaining_chars.len() as u16);
+			}
+		}
+		let _ = self.stdout.flush();
+	}
+	fn console_del(&mut self) {
+		let mut cl:Vec<char> = self.consoleline.clone();
+		let cl_len:u16 = self.consoleline.len() as u16;
+		let cl_pos:u16 = self.consoleline_cursor_pos;
+		if cl_pos < cl_len {
+			let _ = cl.remove(cl_pos as usize);
+			self.consoleline = cl.clone();
+			self.console_set_prompt();
+			self.ins_chars(&cl);
+			self.go_home();
+			self.move_right(PROMPT.len() as u16 + cl_pos);
+		}
+		let _ = self.stdout.flush();
+	}
+	fn console_left(&mut self) {
+		let cl_pos:u16 = self.consoleline_cursor_pos;
+		if cl_pos > 0 {
+			self.move_left(1);
+			self.consoleline_cursor_pos -= 1;
+		}
+		let _ = self.stdout.flush();
+	}
+	fn console_right(&mut self) {
+		let cl_pos:u16 = self.consoleline_cursor_pos;
+		let cl_len:u16 = self.consoleline.len() as u16;
+		if cl_pos < cl_len {
+			self.move_right(1);
+			self.consoleline_cursor_pos += 1;
+		}
+		let _ = self.stdout.flush();
+	}
+	fn console_home(&mut self) {
+		let cl_pos:u16 = self.consoleline_cursor_pos;
+		if cl_pos > 0 {
+			//self.move_left(cl_pos);
+			self.go_home();
+			self.move_right(PROMPT.len() as u16);
+			self.consoleline_cursor_pos = 0;
+		}
+		let _ = self.stdout.flush();
+	}
+	fn console_end(&mut self) {
+		let cl_len:u16 = self.consoleline.len() as u16;
+		let cl_pos:u16 = self.consoleline_cursor_pos;
+		if cl_pos < cl_len {
+			self.move_right(cl_len - cl_pos);
+		}
+		self.consoleline_cursor_pos = cl_len;
+		let _ = self.stdout.flush();
+	}
+	fn console_history_prev(&mut self) {
+		if let Some(line) = self.consoleline_history_backward.pop() {
+			self.console_set_prompt();
+			self.consoleline_history_forward.push(self.consoleline.clone());
+			self.consoleline = line.clone();
+			self.ins_chars(&line);
+			self.consoleline_cursor_pos = line.len() as u16;
+			let _ = self.stdout.flush();
+		}
+	}
+	fn console_history_next(&mut self) {
+		if let Some(line) = self.consoleline_history_forward.pop() {
+			self.console_set_prompt();
+			self.consoleline_history_backward.push(self.consoleline.clone());
+			self.consoleline = line.clone();
+			self.ins_chars(&line);
+			self.consoleline_cursor_pos = line.len() as u16;
+			let _ = self.stdout.flush();
+		} else if self.consoleline.len() != 0 {
+			self.console_set_prompt();
+			self.consoleline_history_backward.push(self.consoleline.clone());
+			self.consoleline = Vec::new();
+			self.consoleline_cursor_pos = 0;
+			let _ = self.stdout.flush();
+		}
+	}
+}
 
 fn main() {
+	// get command line arguments
 	let arguments = clap_app!(app =>
 		(name: "Teamech Console")
 		(version: VERSION)
-		(author: "Ellie D.")
-		(about: "Desktop console client for the Teamech protocol.")
+		(author: "Ellie D. Martin-Eberhardt")
+		(about: "Terminal client for the Teamech protocol.")
 		(@arg ADDRESS: +required "Remote address to contact.")
 		(@arg KEY: +required "Identity file to use for encryption/decryption (must be matched by a duplicate file registered on the server).")
 		(@arg port: -p --port +takes_value "Remote port on which to contact the server.")
-		(@arg name: -n --name +takes_value "Unique identifier to present to the server for routing.")
-		(@arg class: -c --class +takes_value "Non-unique identifier to present to the server for routing.")
 		(@arg localport: -l --localport +takes_value "UDP port to bind to locally (automatic if unset).")
 		(@arg showhex: -h --showhex "Show hexadecimal values of messages (useful if working with binary messages).")
-		(@arg ipv4: -o --ipv4 "Use IPv4 instead of IPv6.") 
+		(@arg ipv4: -i --ipv4 "Use IPv4 instead of IPv6.") 
 	).get_matches();
-	let client_name:&str = arguments.value_of("name").unwrap_or("human");
-	let client_class:&str = arguments.value_of("class").unwrap_or("supervisor");
+	// set up the terminal window
+	let mut term = init_term();
+	term.clear_window();
+	term.go_home();
+	term.console_set_prompt();
+	term.console_version();
+	// recovery: catches breaks from 'processor. break to quit the client. 
 	'recovery:loop {
-		set_var("ESCDELAY","0"); // force ESCDELAY to be 0, so we can quit the application with the ESC key without delay.
-		let log_file_name:String = format!("{}-teamech-console.log",Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
-		let mut window_logger = new_windowlogger(&log_file_name);
-		start_color();
-		use_default_colors();
-		init_pair(1,14,COLOR_BLACK); // bars
-		init_pair(2,14,COLOR_BLACK); // status codes
-		window_logger.window.refresh(); // must be called every time the screen is to be updated.
-		window_logger.window.keypad(true); // keypad mode, which is typical 
-		window_logger.window.nodelay(true); // nodelay mode, which ensures that the window is actually updated on time
-		noecho(); // prevent local echo, since we'll be handling that ourselves
-		window_logger.window.mv(window_logger.window.get_max_y()-1,0); // go to the bottom left corner
-		window_logger.window.refresh();
-		// Print welcome messages
-		window_logger.print(&format!("Teamech Console {}",&VERSION));
-		window_logger.print("Press <Esc> to exit (or Ctrl-C to force exit).");
-		window_logger.print("");
-		window_logger.print(&format!("Using log file {} in ~/{}.",&log_file_name,(Path::new(&MAIN_DIRECTORY).join(Path::new(&LOG_DIRECTORY))).display()));
-		window_logger.print("");
-		window_logger.print("Initializing client...");
-		let home_dir:PathBuf = match dirs::home_dir() {
-			None => PathBuf::from("."),
-			Some(dir) => dir,
-		};
-		let key_location:&str = arguments.value_of("KEY").expect("failed to get command line argument for identity filename");
-		let identity_path:PathBuf;
-		let absolute_identity_path:PathBuf = (Path::new("/").join(Path::new(&key_location))).to_owned();
-		let relative_identity_path:PathBuf = (Path::new(".").join(Path::new(&key_location))).to_owned();
-		let main_dir_identity_path:PathBuf = (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&KEY_DIRECTORY)).join(Path::new(&key_location))).to_owned();
-		if absolute_identity_path.exists() {
-			identity_path = absolute_identity_path;
-		} else if relative_identity_path.exists() {
-			identity_path = relative_identity_path;
-		} else if main_dir_identity_path.exists() {
-			identity_path = main_dir_identity_path;
-		} else {
-			endwin();
-			println!("checking for ID file at {}",absolute_identity_path.display());
-			println!("checking for ID file at {}",relative_identity_path.display());
-			println!("checking for ID file at {}",main_dir_identity_path.display());
-			eprintln!("Failed to open specified identity file: file not found.");
-			process::exit(1);
-		}
-		let mut client = match teamech::new_client(
-			identity_path.as_path(),
-			&arguments.value_of("ADDRESS").unwrap_or(""),
-			arguments.value_of("port").unwrap_or("1413").parse::<u16>().unwrap_or(1413),
-			arguments.value_of("localport").unwrap_or("1612").parse::<u16>().unwrap_or(1612),
-			!arguments.is_present("ipv4")) {
+		// extract parameters from command line arguments
+		let local_port:u16 = match arguments.value_of("localport").unwrap_or("3841").parse::<u16>() {
 			Err(why) => {
-				endwin();
-				eprintln!("Failed to instantiate client: {}",why);
-				process::exit(1);
+				term.console_error("Failed to parse given port number as an integer. See --help for help.");
+				term.console_error(&format!("{}",why));
+				exit(1);
+			},
+			Ok(n) => n,
+		};
+		let remote_port:u16 = match arguments.value_of("port").unwrap_or("3840").parse::<u16>() {
+			Err(why) => {
+				term.console_error("Failed to parse given port number as an integer. See --help for help.");
+				term.console_error(&format!("{}",why));
+				exit(1);
+			},
+			Ok(n) => n,
+		};
+		// it's okay to .expect this, instead of matching it, because clap is supposed to handle telling the user what's wrong if they miss
+		// a required argument.
+		let key_location:&Path = Path::new(arguments.value_of("KEY").expect("failed to get command line argument for identity filename"));
+		let server_address:IpAddr = match (&arguments.value_of("ADDRESS").expect("failed to get command line argument for address")).parse::<IpAddr>() {
+			Err(why) => {
+				term.console_error(&format!("Could not parse first argument as an IP address: {}",why));
+				exit(1);
+			},
+			Ok(addr) => addr,
+		};
+		// instantiate the client
+		let mut teamech_client = match teamech::new_client(&key_location,&server_address,remote_port,local_port) {
+			Err(why) => {
+				term.console_error(&format!("Failed to instantiate client: {}",why));
+				exit(1);
 			},
 			Ok(client) => client,
 		};
-		client.name = client_name.to_owned();
-		client.classes.push(client_class.to_owned());
-		window_logger.print("Client initialized.");
-		let _ = client.set_asynchronous(10);
-		match window_logger.log_to_file(&format!("Opened log file."),Local::now()) {
+		// set asynchronous - very important for human-interacting clients such as this.
+		match teamech_client.set_asynchronous(10) {
 			Err(why) => {
-				window_logger.print(&format!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED!",
-					&log_file_name,why));
+				term.console_error(&format!("teamech-console: could not set client to asynchronous (nonblocking) mode: {}",why));
+				exit(1);
 			},
 			Ok(_) => (),
 		};
-		'authtry:loop {
-			window_logger.log(&format!("Trying to contact server at {}...",&client.server_address));
-			match client.subscribe() {
-				Err(why) => {
-					window_logger.log(&format!("Failed to subscribe to server - {}.",why));
-					sleep(Duration::new(5,0));
-					continue 'authtry;
-				},
-				Ok(_) => (),
-			};
-			window_logger.log(&format!("Successfully contacted server at {}",&client.server_address));
-			break;
-		} // 'authtry
-		'operator:loop {
-			match client.get_packets() {
-				Err(why) => {
-					window_logger.log(&format!("Failed to get packets from server - {}. Restarting...",why));
-					continue 'recovery;
-				},
-				Ok(_) => (),
-			};
-			while let Some(event) = client.event_log.pop_front() {
-				match event.class {
-					teamech::EventClass::TestResponse => { 
-						if event.parameter.len() > 0 {
-							let mut screen_line = 0;
-							for entry in window_logger.sent_lines.iter() {
-								if entry.0 == event.contents {
-									screen_line = entry.1;
-									break;
-								}
-							}
-							window_logger.print_left(&format!("~[ {} ]",&event.parameter),screen_line);
-						}
-					},
-					teamech::EventClass::Acknowledge => { 
-						let mut screen_line = 0;
-						for entry in window_logger.sent_lines.iter() {
-							if entry.0 == event.contents {
-								screen_line = entry.1;
-								break;
-							}
-						}
-						if event.parameter.len() > 0 {
-							window_logger.print_left(&format!(" [ {} ]",&event.parameter),screen_line);
-						}
-					},
-					teamech::EventClass::ClientSubscribe => {
-						window_logger.log("Subscribed to server.");
-					},
-					_ => window_logger.print(&event.to_string()),
-				};
-			}
-			window_logger.handle_keys();
-			while let Some(line) = window_logger.local_lines.pop_front() {
-				if line == b"/quit" {
-					match client.send_packet(&vec![0x18],&vec![]) {
-						Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
-						Ok(_) => (),
-					};
-					endwin();
-					break 'recovery;
+		term.console_info("Loaded identity info:");
+		term.console_info(&format!("Name: @{}",teamech_client.identity.name));
+		term.console_info(&format!("Classes: #{}",teamech_client.identity.classes.join(", #")));
+		// initiate connection
+		term.console_info(&format!("Attempting to contact server at {}...",server_address));
+		match teamech_client.subscribe() {
+			Err(why) => {
+				term.console_error(&format!("Could not open subscription to server ({}). Resetting connection...",why));
+				for _ in 0..20 {
+					sleep(Duration::new(0,100_000_000));
+					if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
+						exit(1);
+					}
 				}
-				if line.len() > 1 && line[0] == b'`' {
-					if line.len() > 2 {
-						match client.send_packet(&vec![line[1]],&line[2..].to_vec()) {
-							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
-							Ok(_) => (),
-						};
+				continue 'recovery;
+			},
+			Ok(_) => (),
+		};
+		//teamech_client.time_tolerance_ms = 60000;
+		term.console_info("Server contacted successfully.");
+		// processor loop. break to immediately reset the client without quitting.
+		'processor:loop {
+			match teamech_client.get_event() {
+				Err(why) => {
+					term.console_error(&format!("Could not receive packets ({}). Resetting connection...",why));
+					for _ in 0..20 {
+						sleep(Duration::new(0,100_000_000));
+						if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
+							exit(1);
+						}
+					}
+					break 'processor;
+				},
+				Ok(Some(net_event)) => {
+					// parse out the lines produced by to_string(), so that we can add colors ourselves
+					let event_string:String = net_event.to_string();
+					let date:&str;
+					let time:&str;
+					let event_text:&str;
+					if event_string.splitn(2," ").count() == 2 {
+						let timestamp:&str = event_string.splitn(2," ").collect::<Vec<&str>>()[0].trim_matches('[').trim_matches(']');
+						if timestamp.splitn(2,"T").count() == 2 {
+							date = timestamp.splitn(2,"T").collect::<Vec<&str>>()[0];
+							time = timestamp.splitn(2,"T").collect::<Vec<&str>>()[1].trim_matches('Z');
+						} else {
+							date = timestamp;
+							time = "";
+						} 
+						event_text = event_string.splitn(2," ").collect::<Vec<&str>>()[1];
 					} else {
-						match client.send_packet(&vec![line[1]],&vec![]) {
-							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
-							Ok(_) => (),
-						};
+						date = "";
+						time = "";
+						event_text = &event_string;
 					}
-				}	
-				let mut packet_hash:String = String::new();
-				if line.len() > 1 && line[0] == b'>' {
-					let messageparts = line.splitn(2,|c| *c == b' ').collect::<Vec<&[u8]>>();
-					if messageparts.len() == 1 {
-						match client.send_packet(&messageparts[0].to_vec(),&vec![]) {
-							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
-							Ok(hash) => packet_hash = hash,
-						};
-					} else if messageparts.len() == 2 {
-						match client.send_packet(&messageparts[0].to_vec(),&messageparts[1].to_vec()) {
-							Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
-							Ok(hash) => packet_hash = hash,
-						};
+					term.console_netevent(date,time,event_text);
+				},
+				Ok(None) => {
+					// flush incoming queue to prevent them from growing indefinitely (event_stream is already empty)
+					teamech_client.clear_packet_queue();
+				},
+			};
+			match teamech_client.resend_unacked() {
+				Err(why) => {
+					term.console_println(&format!("{}-!- Error:{} Could not retransmit packets ({}). Resetting connection...",Fg(Red),Fg(Reset),why));
+					for _ in 0..20 {
+						sleep(Duration::new(0,100_000_000));
+						if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
+							exit(1);
+						}
 					}
-				} else {
-					match client.send_packet(&vec![b'>'],&line) {
-						Err(why) => window_logger.print(&format!("-!- Failed to send packet - {}.",why)),
-						Ok(hash) => packet_hash = hash,
-					};
-				}
-				window_logger.sent_lines.push_back((packet_hash,window_logger.history.len()));
-				while window_logger.sent_lines.len() > 64 {
-					let _ = window_logger.sent_lines.pop_front();
-				}
-			}
-			window_logger.window.refresh();
-		} // 'operator
+					break 'processor;
+				},
+				Ok(_) => (),
+			};
+			if let Some(key_event) = term.get_event() {
+				match key_event {
+					Event::Key(Key::Ctrl('c'))|Event::Key(Key::Ctrl('d')) => { // quit
+						term.console_println(&format!("{}-*-{} Closing connection...",Fg(Cyan),Fg(Reset)));
+						match teamech_client.unsubscribe() {
+							Err(why) => {
+								term.console_println(&format!("{}-!- Warning:{} Failed to disconnect from server before quitting ({}).",Fg(Yellow),Fg(Reset),why));
+							},
+							Ok(_) => {
+								term.console_println(&format!("{}-*-{} Connection closed.",Fg(Cyan),Fg(Reset)));
+							},
+						};
+						term.ins_str("\r\n");
+						break 'recovery;
+					},
+					Event::Key(Key::Left) => {
+						term.console_left();
+					}
+					Event::Key(Key::Right) => {
+						term.console_right();
+					},
+					Event::Key(Key::Up) => {
+						term.console_history_prev();
+					},
+					Event::Key(Key::Down) => {
+						term.console_history_next();
+					},
+					Event::Key(Key::Home) => {
+						term.console_home()
+					},
+					Event::Key(Key::End) => {
+						term.console_end()
+					},
+					Event::Key(Key::Backspace) => {
+						term.console_backspace();
+					},
+					Event::Key(Key::Delete) => {
+						term.console_del();
+					},
+					Event::Key(Key::Insert) => {
+						term.print_coords_debug();
+						//term.console_set_prompt();
+					}
+					Event::Key(Key::Char(c)) => match c {
+						'\n'|'\r' => { // enter key
+							let transmit_line:String = term.console_feed();
+							let parameter:&str;
+							let payload:&str;
+							if transmit_line.starts_with(">") {
+								let line_split:Vec<&str> = transmit_line.splitn(2," ").collect::<Vec<&str>>();
+								parameter = line_split[0];
+								if line_split.len() > 1 {
+									payload = line_split[1];
+								} else {
+									payload = "";
+								}
+							} else {
+								parameter = ">";
+								payload = &transmit_line;
+							}
+							match teamech_client.send_packet(&parameter.as_bytes().to_vec(),&payload.as_bytes().to_vec()) {
+								Err(why) => {
+									term.console_error(&format!("Could not transmit packet ({}). Resetting connection...",why));
+									sleep(Duration::new(1,0));
+									continue 'recovery;
+								},
+								Ok(_) => (),
+							};
+						},
+						_ => {
+							term.console_ins_char(c);
+						},
+					},
+					_ => (),
+				};
+			} // keyboard events
+		} // 'processor
 	} // 'recovery
-} // fn main
-
+} // main() 

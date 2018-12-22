@@ -3,22 +3,12 @@ static VERSION:&str = "0.10.0 October 2018";
 #[macro_use]
 extern crate clap;
 
-extern crate rand;
-
-extern crate byteorder;
-use byteorder::{LittleEndian,WriteBytesExt};
-
 use std::fs::File;
 use std::process;
 use std::io::prelude::*;
+use std::io;
 
-fn u64_to_bytes(number:&u64) -> [u8;8] {
-	let mut bytes:[u8;8] = [0;8];
-	bytes.as_mut().write_u64::<LittleEndian>(*number).expect("failed to convert u64 to bytes");
-	return bytes;
-}
-
-fn bytes_to_hex(v:&Vec<u8>) -> String {
+fn bytes_to_hex(v:&[u8]) -> String {
 	let mut result:String = String::from("");
 	for x in 0..v.len() {
 		if v[x] == 0x00 {
@@ -30,6 +20,18 @@ fn bytes_to_hex(v:&Vec<u8>) -> String {
 		}
 	}
 	return result;
+}
+
+fn get_rand_bytes(buffer:&mut [u8]) -> Result<(),io::Error> {
+	let random_device_path:&str = "/dev/urandom";
+	let mut random_device_descriptor:File = match File::open(&random_device_path) {
+		Err(why) => return Err(why),
+		Ok(file) => file,
+	};
+	match random_device_descriptor.read(buffer) {
+		Err(why) => return Err(why),
+		Ok(_) => return Ok(()),
+	};
 }
 
 fn main() {
@@ -44,15 +46,17 @@ fn main() {
 	).get_matches();
 	let mut file_text:Vec<u8> = Vec::new();
 	file_text.push(b'I');
-	for byte in bytes_to_hex(&u64_to_bytes(&rand::random::<u64>()).to_vec()).as_bytes().iter() {
+	let mut ibuffer:[u8;8] = [0;8];
+	let _ = get_rand_bytes(&mut ibuffer);
+	for byte in bytes_to_hex(&ibuffer).as_bytes().iter() {
 		file_text.push(*byte);
 	}
 	file_text.push(b'\n');
 	file_text.push(b'K');
-	for _ in 0..4 {
-		for byte in bytes_to_hex(&u64_to_bytes(&rand::random::<u64>()).to_vec()).as_bytes().iter() {
-			file_text.push(*byte);
-		}
+	let mut kbuffer:[u8;32] = [0;32];
+	let _ = get_rand_bytes(&mut kbuffer);
+	for byte in bytes_to_hex(&kbuffer).as_bytes().iter() {
+		file_text.push(*byte);
 	}
 	file_text.push(b'\n');
 	file_text.push(b'@');

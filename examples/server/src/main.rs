@@ -1,4 +1,4 @@
-static VERSION:&str = "0.11.1 November 2018";
+static VERSION:&str = "0.11.1 December 2018";
 static MAIN_DIRECTORY:&str = "teamech/";
 static LOG_DIRECTORY:&str = "logs/server/";
 static KEY_DIRECTORY:&str = "keys/server/";
@@ -85,7 +85,7 @@ fn main() {
 		(@arg name: -n --name +takes_value "Unique name to identify this server to other servers.")
 	).get_matches();
 	// parse values from arguments
-	let port_number:u16 = match arguments.value_of("port").unwrap_or("1413").parse::<u16>() {
+	let port_number:u16 = match arguments.value_of("port").unwrap_or("3840").parse::<u16>() {
 		Err(why) => {
 			eprintln!("Failed to parse given port number as an integer. See --help for help.");
 			eprintln!("{}",why);
