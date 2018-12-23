@@ -1,6 +1,5 @@
 static PROMPT:&str = "[teamech]~ ";
 static VERSION:&str = "0.12.0 December 2018";
-static THROTTLE:u64 = 0;
 
 extern crate termion;
 use termion::raw::{IntoRawMode,RawTerminal};
@@ -24,6 +23,7 @@ use std::thread::sleep;
 use std::net::IpAddr;
 //use std::fs::File;
 use std::path::Path;
+use std::fmt::Display;
 
 struct Terminal {
 	stdin_events: Events<termion::AsyncReader>,
@@ -122,8 +122,6 @@ impl Terminal {
 		} else {
 			self.cursor_xpos += 1;
 		}
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn ins_chars(&mut self,cs:&Vec<char>) {
 		for c in cs.iter() {
@@ -176,8 +174,6 @@ impl Terminal {
 			let _ = self.stdout.write(&format!("{}",cursor::Right(n)).as_bytes());
 			self.cursor_xpos += n;
 		}
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn move_down(&mut self,n:u16) {
 		let _ = self.stdout.write(&format!("{}",cursor::Down(n)).as_bytes());
@@ -187,8 +183,6 @@ impl Terminal {
 		} else {
 			self.cursor_ypos = max_y;
 		}
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn move_up(&mut self,n:u16) {
 		let _ = self.stdout.write(&format!("{}",cursor::Up(n)).as_bytes());
@@ -197,27 +191,19 @@ impl Terminal {
 		} else {
 			self.cursor_ypos = 1;
 		}
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn move_to(&mut self,x:u16,y:u16) {
 		let _ = self.stdout.write(&format!("{}",cursor::Goto(x,y)).as_bytes());
 		self.cursor_xpos = x;
 		self.cursor_ypos = y;
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn set_xpos(&mut self,x:u16) {
 		let ypos = self.cursor_ypos;
 		self.move_to(x,ypos);
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn set_ypos(&mut self,y:u16) {
 		let xpos = self.cursor_xpos;
 		self.move_to(xpos,y);
-		let _ = self.stdout.flush();
-		sleep(Duration::from_millis(THROTTLE));
 	}
 	fn save_pos(&mut self) {
 		self.saved_pos = (self.cursor_xpos,self.cursor_ypos);
@@ -316,9 +302,14 @@ impl Terminal {
 		if self.consoleline_history_backward.last() != Some(&cl) && cl.len() != 0 {
 			self.consoleline_history_backward.push(cl.clone());
 		}
-		self.console_set_prompt();
+		self.ins_str("\r\n");
+		self.cursor_xpos = 1;
+		if self.cursor_ypos < self.get_size().1 {
+			self.cursor_ypos += 1;
+		}
 		self.consoleline = Vec::new();
 		self.consoleline_cursor_pos = 0;
+		self.console_set_prompt();
 		let _ = self.stdout.flush();
 		return cl.iter().collect::<String>();
 	}
@@ -351,6 +342,9 @@ impl Terminal {
 	fn console_endl(&mut self) {
 		let cl:Vec<char> = self.consoleline.clone();
 		self.ins_str("\r\n");
+		if self.cursor_ypos < self.get_size().1 {
+			self.cursor_ypos += 1;
+		}
 		self.line_number += 1;
 		self.console_set_prompt();
 		self.ins_chars(&cl);
@@ -402,6 +396,21 @@ impl Terminal {
 		self.ins_str_novis(&format!("{}",Fg(Reset)));
 		self.ins_str("] ");
 		self.ins_str(&contents);
+		self.console_endl();
+	}
+	fn console_netevent_color<T:Display>(&mut self,color:T,date:&str,time:&str,contents:&str) {
+		self.console_startl("[");
+		self.ins_str_novis(&format!("{}",Fg(LightMagenta)));
+		self.ins_str(&date);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str("] [");
+		self.ins_str_novis(&format!("{}",Fg(LightBlue)));
+		self.ins_str(&time);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
+		self.ins_str("] ");
+		self.ins_str_novis(&format!("{}",color));
+		self.ins_str(&contents);
+		self.ins_str_novis(&format!("{}",Fg(Reset)));
 		self.console_endl();
 	}
 	fn console_backspace(&mut self) {
@@ -507,6 +516,8 @@ fn main() {
 		(@arg KEY: +required "Identity file to use for encryption/decryption (must be matched by a duplicate file registered on the server).")
 		(@arg port: -p --port +takes_value "Remote port on which to contact the server.")
 		(@arg localport: -l --localport +takes_value "UDP port to bind to locally (automatic if unset).")
+		(@arg showraw: -a --showraw "show local and remote acknowledge messages.")
+		(@arg showall: -v --verbose "show all event types.")
 		(@arg showhex: -h --showhex "Show hexadecimal values of messages (useful if working with binary messages).")
 		(@arg ipv4: -i --ipv4 "Use IPv4 instead of IPv6.") 
 	).get_matches();
@@ -519,7 +530,7 @@ fn main() {
 	// recovery: catches breaks from 'processor. break to quit the client. 
 	'recovery:loop {
 		// extract parameters from command line arguments
-		let local_port:u16 = match arguments.value_of("localport").unwrap_or("3841").parse::<u16>() {
+		let local_port:u16 = match arguments.value_of("localport").unwrap_or("0").parse::<u16>() {
 			Err(why) => {
 				term.console_error("Failed to parse given port number as an integer. See --help for help.");
 				term.console_error(&format!("{}",why));
@@ -565,7 +576,7 @@ fn main() {
 		term.console_info(&format!("Name: @{}",teamech_client.identity.name));
 		term.console_info(&format!("Classes: #{}",teamech_client.identity.classes.join(", #")));
 		// initiate connection
-		term.console_info(&format!("Attempting to contact server at {}...",server_address));
+		term.console_info(&format!("Attempting to contact server at {}:{}...",server_address,remote_port));
 		match teamech_client.subscribe() {
 			Err(why) => {
 				term.console_error(&format!("Could not open subscription to server ({}). Resetting connection...",why));
@@ -615,7 +626,41 @@ fn main() {
 						time = "";
 						event_text = &event_string;
 					}
-					term.console_netevent(date,time,event_text);
+					let showraw:bool = arguments.is_present("showraw") || arguments.is_present("showall");
+					match net_event {
+						teamech::Event::Acknowledge {timestamp:_,sender:_,address:_,hash:_,matches:_} => {
+							term.console_netevent_color(Fg(Magenta),date,time,event_text);
+						},
+						teamech::Event::SendMessage {timestamp:_,sender:_,destination:_,address:_,parameter,payload:_,hash:_} => {
+							match parameter[..] {
+								[0x06] => if showraw {
+									term.console_netevent_color(Fg(Blue),date,time,event_text);
+								},
+								[0x15] => if showraw {
+									term.console_netevent_color(Fg(Red),date,time,event_text);
+								},
+								_ => term.console_netevent_color(Fg(LightCyan),date,time,event_text),
+							};
+						},
+						teamech::Event::ReceiveMessage {timestamp:_,sender:_,address:_,parameter,payload:_,hash:_} => {
+							match parameter[..] {
+								[0x06] => if showraw {
+									term.console_netevent_color(Fg(Magenta),date,time,event_text);
+								},
+								[0x15] => if showraw {
+									term.console_netevent_color(Fg(Red),date,time,event_text);
+								},
+								[0x03]|[0x04]|[0x05] => if showraw {
+									term.console_netevent_color(Fg(LightYellow),date,time,event_text);
+								}
+								_ => term.console_netevent_color(Fg(LightYellow),date,time,event_text),
+							};
+						},
+						teamech::Event::Refusal {timestamp:_,sender:_,address:_,hash:_} => {
+							term.console_netevent_color(Fg(LightRed),date,time,event_text);
+						}
+						_ => term.console_netevent(date,time,event_text),
+					};
 				},
 				Ok(None) => {
 					// flush incoming queue to prevent them from growing indefinitely (event_stream is already empty)
@@ -692,8 +737,13 @@ fn main() {
 									payload = "";
 								}
 							} else {
-								parameter = ">";
-								payload = &transmit_line;
+								if transmit_line == "?" {
+									parameter = "\x05";
+									payload = "";
+								} else {
+									parameter = ">";
+									payload = &transmit_line;
+								}
 							}
 							match teamech_client.send_packet(&parameter.as_bytes().to_vec(),&payload.as_bytes().to_vec()) {
 								Err(why) => {
