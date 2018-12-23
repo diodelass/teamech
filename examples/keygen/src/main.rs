@@ -40,7 +40,7 @@ fn main() {
 		(version: VERSION)
 		(author: "Ellie D.")
 		(about: "Generates identity key files to enable links between clients and servers..")
-		(@arg FILE: "Path to the file to which the identity data should be written.")
+		(@arg FILE: +required "Path to the file to which the identity data should be written.")
 		(@arg name: -n --name +takes_value "Name to use for this client.")
 		(@arg class: -c --class +takes_value "Main class to use for this client.")
 	).get_matches();

@@ -631,30 +631,36 @@ fn main() {
 						teamech::Event::Acknowledge {timestamp:_,sender:_,address:_,hash:_,matches:_} => {
 							term.console_netevent_color(Fg(Magenta),date,time,event_text);
 						},
-						teamech::Event::SendMessage {timestamp:_,sender:_,destination:_,address:_,parameter,payload:_,hash:_} => {
+						teamech::Event::SendPacket {timestamp:_,destination:_,address:_,parameter,payload:_,hash:_} => if showraw {
 							match parameter[..] {
-								[0x06] => if showraw {
+								[0x06] => {
 									term.console_netevent_color(Fg(Blue),date,time,event_text);
 								},
-								[0x15] => if showraw {
+								[0x15] => {
 									term.console_netevent_color(Fg(Red),date,time,event_text);
 								},
-								_ => term.console_netevent_color(Fg(LightCyan),date,time,event_text),
+								_ => term.console_netevent_color(Fg(Cyan),date,time,event_text),
 							};
 						},
-						teamech::Event::ReceiveMessage {timestamp:_,sender:_,address:_,parameter,payload:_,hash:_} => {
+						teamech::Event::ReceivePacket {timestamp:_,sender:_,address:_,parameter,payload:_,hash:_} => if showraw {
 							match parameter[..] {
-								[0x06] => if showraw {
+								[0x06] => {
 									term.console_netevent_color(Fg(Magenta),date,time,event_text);
 								},
-								[0x15] => if showraw {
+								[0x15] => {
 									term.console_netevent_color(Fg(Red),date,time,event_text);
 								},
-								[0x03]|[0x04]|[0x05] => if showraw {
-									term.console_netevent_color(Fg(LightYellow),date,time,event_text);
+								[0x03]|[0x04]|[0x05] => {
+									term.console_netevent_color(Fg(Yellow),date,time,event_text);
 								}
-								_ => term.console_netevent_color(Fg(LightYellow),date,time,event_text),
+								_ => term.console_netevent_color(Fg(Yellow),date,time,event_text),
 							};
+						},
+						teamech::Event::SendMessage {timestamp:_,destination:_,address:_,parameter:_,payload:_,hash:_} => {
+							term.console_netevent_color(Fg(LightCyan),date,time,event_text);
+						},
+						teamech::Event::ReceiveMessage {timestamp:_,sender:_,address:_,parameter:_,payload:_,hash:_} => {
+							term.console_netevent_color(Fg(LightYellow),date,time,event_text);
 						},
 						teamech::Event::Refusal {timestamp:_,sender:_,address:_,hash:_} => {
 							term.console_netevent_color(Fg(LightRed),date,time,event_text);

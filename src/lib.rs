@@ -141,8 +141,7 @@ fn milliseconds_now() -> i64 {
 	return now.sec*1000 + (now.nsec as i64)/1000000;
 }
 
-// This function converts a byte vector of arbitrary length into a hexadecimal
-// string. It is used almost entirely for debugging.
+// converts bytes into a hex string in the form xx.xx.xx.xx.
 fn bytes_to_hex(v:&[u8]) -> String {
 	let mut result:String = String::from("");
 	for x in 0..v.len() {
@@ -160,6 +159,8 @@ fn bytes_to_hex(v:&[u8]) -> String {
 	return result;
 }
 
+// given bytes, produces a hex string of at most the first two bytes.
+// used instead of bytes_to_hex() for creating human-readable short identifiers.
 fn bytes_to_tag(v:&[u8]) -> String {
 	if v.len() > 2 {
 		return bytes_to_hex(&v[..2]);
@@ -168,17 +169,18 @@ fn bytes_to_tag(v:&[u8]) -> String {
 	}
 }
 
+// given some bytes, produces either a UTF-8 decoding or, if the decoding fails,
+// a hex string.
 fn view_bytes(v:&[u8]) -> String {
 	if v.len() == 0 {
 		return String::new();
 	}
+	if v[0] <= 0x1F {
+		return bytes_to_hex(&v);
+	}
 	match String::from_utf8(v.to_vec()) {
 		Err(_) => return bytes_to_hex(&v),
-		Ok(string) => if v[0] <= 0x1F {
-			return bytes_to_hex(&v);
-		} else {
-			return string;
-		},
+		Ok(string) => return string,
 	};
 }
 
@@ -282,6 +284,7 @@ pub enum Event {
 	},
 	ServerCreate {
 		// server object instantiated.
+		address:SocketAddr,
 		timestamp:Tm,
 	},
 	ClientCreate {
@@ -363,8 +366,17 @@ pub enum Event {
 		reason:String,
 		timestamp:Tm,
 	},
+	ReceivePacket {
+		// we've just received some kind of packet.
+		sender:String,
+		address:SocketAddr,
+		parameter:Vec<u8>,
+		payload:Vec<u8>,
+		hash:Vec<u8>,
+		timestamp:Tm,
+	},
 	ReceiveMessage {
-		// we've just received a message.
+		// the packet we just received is  a message.
 		sender:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -377,9 +389,17 @@ pub enum Event {
 		reason:String,
 		timestamp:Tm,
 	},
+	SendPacket { 
+		// we've just transmitted a packet of some kind.
+		destination:String,
+		address:SocketAddr,
+		parameter:Vec<u8>,
+		payload:Vec<u8>,
+		hash:Vec<u8>,
+		timestamp:Tm,
+	},
 	SendMessage {
-		// we've transmitted a packet.
-		sender:String,
+		// we've transmitted a packet containing a message.
 		destination:String,
 		address:SocketAddr,
 		parameter:Vec<u8>,
@@ -518,13 +538,13 @@ impl Event {
 	pub fn to_string(&self) -> String {
 		match self {
 			Event::Acknowledge {timestamp,hash,sender,address,matches} => {
-				return format!("[{}] Acknowledgement of [{}] by {} [{}] ({})",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address,&matches);
+				return format!("[{}] ack [{}] - {} [{}] ({})",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address,&matches);
 			},
 			Event::Refusal {timestamp,hash,sender,address} => {
-				return format!("[{}] Refusal of [{}] by {} [{}]",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address);
+				return format!("[{}] nak [{}] - {} [{}]",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address);
 			},
-			Event::ServerCreate {timestamp} => {
-				return format!("[{}] Server initialization complete.",&print_time(&timestamp));
+			Event::ServerCreate {timestamp,address} => {
+				return format!("[{}] Server initialized on {}.",&print_time(&timestamp),&address);
 			},
 			Event::ClientCreate {timestamp,address} => {
 				return format!("[{}] Client initialized on {}.",&print_time(&timestamp),&address);
@@ -565,15 +585,23 @@ impl Event {
 			Event::ServerUnlinkFailure {timestamp,address,reason} => {
 				return format!("[{}] Failed to unlink from server at [{}]: {}",&print_time(&timestamp),&address,&reason);
 			},
+			Event::ReceivePacket {timestamp,sender,address,parameter,payload,hash} => {
+				return format!("[{}] recv({} [{}]): [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
+					view_bytes(&parameter),view_bytes(&payload));
+			},
 			Event::ReceiveMessage {timestamp,sender,address,parameter,payload,hash} => {
-				return format!("[{}] {} [{}]: [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
+				return format!("[{}] {} [{}] -> [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
 					view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::ReceiveFailure {timestamp,reason} => {
 				return format!("[{}] Could not receive packet: {}",&print_time(&timestamp),&reason);
 			},
-			Event::SendMessage {timestamp,sender,destination,address,parameter,payload,hash} => {
-				return format!("[{}] {} -> {} [{}]: [{}] [{}] {}",&print_time(&timestamp),&sender,&destination,&address,
+			Event::SendPacket {timestamp,destination,address,parameter,payload,hash} => {
+				return format!("[{}] send({} [{}]): [{}] [{}] {}",&print_time(&timestamp),&destination,&address,
+					&bytes_to_tag(&hash),view_bytes(&parameter),view_bytes(&payload));
+			},
+			Event::SendMessage {timestamp,destination,address,parameter,payload,hash} => {
+				return format!("[{}] {} [{}] <- [{}] [{}] {}",&print_time(&timestamp),&destination,&address,
 					&bytes_to_tag(&hash),view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::SendFailure {timestamp,destination,address,reason} => {
@@ -894,7 +922,7 @@ impl Client {
 				Ok((receive_length,source_address)) => {
 					if source_address == self.server_address {
 						let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
-						self.event_stream.push_back(Event::ReceiveMessage {
+						self.event_stream.push_back(Event::ReceivePacket {
 							sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
 							address:received_packet.source.clone(),
 							parameter:received_packet.parameter.clone(),
@@ -983,7 +1011,7 @@ impl Client {
 								}
 								(0x02,0) => {
 									self.event_stream.push_back(Event::ClientSubscribe {
-										sender:received_packet.sender.clone(),
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:self.server_address.clone(),
 										timestamp:now_utc(),
 									});
@@ -1020,6 +1048,14 @@ impl Client {
 									});
 								},
 								(b'>',_) => {
+									self.event_stream.push_back(Event::ReceiveMessage {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										parameter:received_packet.parameter.clone(),
+										payload:received_packet.payload.clone(),
+										hash:received_packet.hash.clone(),
+										timestamp:now_utc(),
+									});
 									let mut ack_payload:Vec<u8> = Vec::new();
 									ack_payload.append(&mut received_packet.hash.clone());
 									ack_payload.append(&mut u64_to_bytes(&1).to_vec());
@@ -1105,6 +1141,14 @@ impl Client {
 		sha3.update(&bottle);
 		sha3.finalize(&mut packet_hash);
 		if parameter.len() > 0 && [b'>'].contains(&&parameter[0]) {
+			self.event_stream.push_back(Event::SendMessage {
+				destination:String::from("server"),
+				address:self.server_address.clone(),
+				parameter:parameter.clone(),
+				payload:payload.clone(),
+				hash:packet_hash.clone(),
+				timestamp:now_utc(),
+			});
 			self.unacked_packets.insert(packet_hash.clone(),UnackedPacket {
 				raw:bottle.clone(),
 				decrypted:payload.clone(),
@@ -1118,8 +1162,7 @@ impl Client {
 				payload:payload.clone(),
 			});
 		}
-		self.event_stream.push_back(Event::SendMessage {
-			sender:String::from("local"),
+		self.event_stream.push_back(Event::SendPacket {
 			destination:String::from("server"),
 			address:self.server_address.clone(),
 			parameter:parameter.clone(),
@@ -1476,6 +1519,7 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 	match UdpSocket::bind(&format!("[::]:{}",port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
+			let addr = socket.local_addr().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)),0));
 			let mut created_server = Server {
 				name:name.to_owned(),
 				socket:socket,
@@ -1500,6 +1544,7 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				ack_fake_lag_ms:0,
 			};
 			created_server.event_stream.push_back(Event::ServerCreate {
+				address:addr,
 				timestamp:now_utc(),
 			});
 			return Ok(created_server);
@@ -1812,8 +1857,7 @@ impl Server {
 		let mut sha3 = Keccak::new_sha3_256();
 		sha3.update(&bottle);
 		sha3.finalize(&mut packet_hash);
-		self.event_stream.push_back(Event::SendMessage {
-			sender:String::from("local"),
+		self.event_stream.push_back(Event::SendPacket {
 			destination:String::from("client"),
 			address:address.clone(),
 			parameter:parameter.clone(),
@@ -1931,7 +1975,7 @@ impl Server {
 						continue;
 					}
 					let received_packet:Packet = self.decrypt_packet(&input_buffer[..receive_length].to_vec(),&source_address);
-					self.event_stream.push_back(Event::ReceiveMessage {
+					self.event_stream.push_back(Event::ReceivePacket {
 						sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
 						address:received_packet.source.clone(),
 						parameter:received_packet.parameter.clone(),
