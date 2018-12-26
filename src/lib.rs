@@ -197,68 +197,129 @@ fn wordmatch(pattern:&str,input:&str) -> bool {
 	}
 	let paddedinput:&str = &format!(" {} ",input);
 	let ops:Vec<&str> = vec!["/","!","&","|","^","(",")"];
-	let mut fixedpattern:String = String::from(pattern);
+	let mut spacedpattern:String = String::from(pattern);
+	let mut boolpattern:String = String::new();
 	for c in ops.iter() {
 		// first, pad all the operators with spaces to make them come up as their own elements
 		// when the string is split on whitespace.
-		fixedpattern = fixedpattern.replace(c,&format!(" {} ",c));
+		spacedpattern = spacedpattern.replace(c,&format!(" {} ",c));
 	}
-	for element in fixedpattern.clone().split_whitespace() {
+	for element in spacedpattern.clone().split_whitespace() {
 		// replace all the terms of the expression with "1" or "0" depending on whether they 
 		// individually match the input.
 		let paddedelement:&str = &format!(" {} ",element);
-		if !ops.contains(&element) {
+		if ops.contains(&element) {
+			boolpattern.push_str(&element);
+		} else {
 			if paddedinput.contains(&paddedelement) {
-				fixedpattern = fixedpattern.replace(&element,"1");
+				boolpattern.push_str("1");
 			} else {
-				fixedpattern = fixedpattern.replace(&element,"0");
+				boolpattern.push_str("0");
 			}
 		}
 	}
-	// now the expression consists only of operators, "1", and "0".
-	// we remove whatever space padding is left, and start condensing it.
-	fixedpattern = fixedpattern.replace(" ","");
-	fixedpattern = fixedpattern.replace("/","&");
-	loop {
-		// expression evaluation works by replacing combinations of operators and arguments
-		// with their results. this method is perhaps not as fast as it could be, but it
-		// makes for some nice simple code. it's also easy to set up order-of-operations
-		// behavior and handle parentheses correctly.
-		// this would naturally not be an option with decimal numbers or other arguments which
-		// have unlimited possible values, but for booleans, it's still fairly concise.
-		let mut subpattern:String = fixedpattern.clone();
-		// NOT
-		subpattern = subpattern.replace("!0","1");
-		subpattern = subpattern.replace("!1","0");
-		// AND
-		subpattern = subpattern.replace("0&1","0");
-		subpattern = subpattern.replace("1&0","0");
-		subpattern = subpattern.replace("1&1","1");
-		subpattern = subpattern.replace("0&0","0");
-		// Implied AND
-		subpattern = subpattern.replace(")(","&");
-		// XOR
-		subpattern = subpattern.replace("0^1","1");
-		subpattern = subpattern.replace("1^0","1");
-		subpattern = subpattern.replace("1^1","0");
-		subpattern = subpattern.replace("0^0","0");
-		// OR
-		subpattern = subpattern.replace("0|1","1");
-		subpattern = subpattern.replace("1|0","1");
-		subpattern = subpattern.replace("1|1","1");
-		subpattern = subpattern.replace("0|0","0");
-		// Parens
-		subpattern = subpattern.replace("(0)","0");
-		subpattern = subpattern.replace("(1)","1");
-		if subpattern == fixedpattern {
-			break;
-		}
-		fixedpattern = subpattern;
-	}
-	if fixedpattern == "1" {
+	if bool_eval(&boolpattern) == Some(true) {
 		return true;
 	} else {
 		return false;
+	}
+}
+
+// helper function for wordmatch(), handling actual expression evaluation
+fn bool_eval(exp:&str) -> Option<bool> {
+	let mut operators:Vec<char> = Vec::new();
+	let mut values:Vec<bool> = Vec::new();
+	let exp_chars:Vec<char> = exp.chars().collect();
+	for c in exp_chars.iter() {
+		match c {
+			' ' => (),
+			'(' => (),
+			'&'|'/'|'|'|'^'|'!' => operators.push(*c),
+			'1'|'0' => match operators.last() {
+				Some('!') => {
+					match c {
+						'1' => values.push(false),
+						'0' => values.push(true),
+						_ => continue,
+					};
+					let _ = operators.pop();
+				},
+				_ => match c {
+					'1' => values.push(true),
+					'0' => values.push(false),
+					_ => (),
+				},
+			},
+			')' => {
+				let operator:char = match operators.pop() {
+					Some(c) => c,
+					_ => break,
+				};
+				let value1:bool = match values.pop() {
+					Some(b) => b,
+					_ => break,
+				};
+				let value2:bool = match values.pop() {
+					Some(b) => b,
+					_ => {
+						values.push(value1);
+						break;
+					},
+				};
+				values.push(match operator {
+					'&' => match (value1,value2) {
+						(true,true) => true,
+						(true,false) => false,
+						(false,true) => false,
+						(false,false) => false,
+					},
+					'|'|'/' => match (value1,value2) {
+						(true,true) => true,
+						(true,false) => true,
+						(false,true) => true,
+						(false,false) => false,
+					},
+					'^' => match (value1,value2) {
+						(true,true) => false,
+						(true,false) => true,
+						(false,true) => true,
+						(false,false) => false,
+					},
+					_ => break,
+				});
+			},
+			_ => (),
+		};
+	}
+	while values.len() >= 2 && operators.len() >= 1 {
+		if let (Some(value1),Some(value2),Some(operator)) = (values.pop(),values.pop(),operators.pop()) {
+			values.push(match operator {
+				'&'|'/' => match (value1,value2) {
+					(true,true) => true,
+					(true,false) => false,
+					(false,true) => false,
+					(false,false) => false,
+				},
+				'|' => match (value1,value2) {
+					(true,true) => true,
+					(true,false) => true,
+					(false,true) => true,
+					(false,false) => false,
+				},
+				'^' => match (value1,value2) {
+					(true,true) => false,
+					(true,false) => true,
+					(false,true) => true,
+					(false,false) => false,
+				},
+				_ => break,
+			});
+		}
+	}
+	if values.len() == 1 {
+		return Some(values[0]);
+	} else {
+		return None;
 	}
 }
 
@@ -2299,7 +2360,7 @@ impl Server {
 		let send:bool = packet.payload.len() > 0;
 		let mut number_matched:u64 = 0;
 		for server_address in self.linked_servers.clone().keys() {
-			if &packet.source != server_address && packet.parameter.len() >= 1 && [b'>'].contains(&&packet.parameter[0]) {
+			if &packet.source != server_address && [b'>'].contains(&&packet.parameter[0]) {
 				self.event_stream.push_back(Event::RoutedMessage {
 					destination:String::from_utf8_lossy(&packet.sender).to_string(),
 					address:packet.source.clone(),
@@ -2320,9 +2381,9 @@ impl Server {
 			for class in sub.identity.classes.iter() {
 				subscriber_identifiers.push_str(&format!("#{} ",&class));
 			}
-			if packet.source != sub.address && packet.parameter.len() >= 1 && [b'>'].contains(&&packet.parameter[0])
-				&& (wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&subscriber_identifiers) 
-				|| sub.identity.classes.contains(&"supervisor".to_owned())) {
+			let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&subscriber_identifiers);
+			if packet.source != sub.address && [b'>'].contains(&&packet.parameter[0])
+				&& (matched || sub.identity.classes.contains(&"supervisor".to_owned())) {
 				if send {
 					let recipient:String = format!("@{}/#{}",&sub.identity.name,&sub.identity.classes[0]);
 					self.event_stream.push_back(Event::RoutedMessage {
@@ -2356,7 +2417,9 @@ impl Server {
 						let _ = self.recent_packets.pop_front();
 					}
 				}	
-				number_matched += 1;
+				if matched {
+					number_matched += 1;
+				}
 			}
 		}
 		if !send {
