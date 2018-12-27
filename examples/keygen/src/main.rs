@@ -1,4 +1,4 @@
-static VERSION:&str = "0.10.0 October 2018";
+static VERSION:&str = "0.12.1 December 2018";
 
 #[macro_use]
 extern crate clap;

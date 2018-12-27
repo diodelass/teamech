@@ -1,5 +1,5 @@
 static PROMPT:&str = "[teamech]~ ";
-static VERSION:&str = "0.12.0 December 2018";
+static VERSION:&str = "0.12.1 December 2018";
 
 extern crate termion;
 use termion::raw::{IntoRawMode,RawTerminal};
@@ -565,7 +565,7 @@ fn main() {
 			Ok(client) => client,
 		};
 		// set asynchronous - very important for human-interacting clients such as this.
-		match teamech_client.set_asynchronous(10) {
+		match teamech_client.set_asynchronous(1) {
 			Err(why) => {
 				term.console_error(&format!("teamech-console: could not set client to asynchronous (nonblocking) mode: {}",why));
 				exit(1);
@@ -668,10 +668,7 @@ fn main() {
 						_ => term.console_netevent(date,time,event_text),
 					};
 				},
-				Ok(None) => {
-					// flush incoming queue to prevent them from growing indefinitely (event_stream is already empty)
-					teamech_client.clear_packet_queue();
-				},
+				Ok(None) => (),
 			};
 			match teamech_client.resend_unacked() {
 				Err(why) => {

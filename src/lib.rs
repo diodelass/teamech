@@ -1,4 +1,4 @@
-// Teamech v 0.12.0 November 2018
+// Teamech v 0.12.1 November 2018
 // License: AGPL v3
 
 // Editor Recommendations
@@ -80,11 +80,11 @@ use std::thread::sleep;
 use std::net::{UdpSocket,SocketAddr,IpAddr,Ipv4Addr};
 
 fn print_time(now:&Tm) -> String {
-	let mut millis:String = format!("{}",now.tm_nsec/1_000_000);
-	while millis.len() < 3 {
-		millis = format!("0{}",millis);
+	let mut micros:String = format!("{}",now.tm_nsec/1_000);
+	while micros.len() < 6 {
+		micros = format!("0{}",micros);
 	}
-	return format!("{}.{}Z",strftime("%Y-%m-%dT%H:%M:%S",&now).unwrap(),millis);
+	return format!("{}.{}Z",strftime("%Y-%m-%dT%H:%M:%S",&now).unwrap(),micros);
 }
 
 // These functions convert between arrays of eight bytes and 64-bit ints.
@@ -191,7 +191,7 @@ fn view_bytes(v:&[u8]) -> String {
 // - a malformed or unparseable pattern will return false
 // - words containing boolean operators cannot be matched and should not be included
 fn wordmatch(pattern:&str,input:&str) -> bool {
-	if pattern == "" || pattern == "@" || input.contains(&pattern) {
+	if pattern == "" || input.contains(&pattern) {
 		// handle true-returning edge cases first, for speed
 		return true;
 	}
@@ -773,7 +773,6 @@ pub struct Client {
 	pub socket:UdpSocket,																// local socket for transceiving data
 	pub server_address:SocketAddr,											// address of server we're subscribed to
 	pub identity:Identity,
-	pub receive_queue:VecDeque<Packet>,									// incoming packets that need to be processed by the implementation
 	pub subscribed:bool,																// are we subscribed?
 	pub accept_files:bool,
 	pub event_stream:VecDeque<Event>,											// log of events produced by the client
@@ -806,7 +805,6 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 			let mut created_client = Client {
 				socket:socket,
 				server_address:server_socket_address,
-				receive_queue:VecDeque::new(),
 				event_stream:VecDeque::new(),
 				last_number_matched:VecDeque::new(),
 				subscribed:false,
@@ -832,7 +830,7 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 impl Client {
 
 	// set the socket to blocking mode, meaning the program will sit idle on calls to
-	// get_packets() until packets are available. this is the default.
+	// process_packets() until packets are available. this is the default.
 	pub fn set_synchronous(&mut self) -> Result<(),io::Error> {
 		match self.socket.set_read_timeout(None) {
 			Err(why) => return Err(why),
@@ -844,7 +842,7 @@ impl Client {
 	}
 
 	// set the socket to nonblocking mode, meaning the program will wait for a certain
-	// interval during get_packets calls, then move on to something else if no packets
+	// interval during process_packets calls, then move on to something else if no packets
 	// are received. the timeout must be specified as an argument.
 	pub fn set_asynchronous(&mut self,wait_time_ms:u64) -> Result<(),io::Error> {
 		match self.socket.set_read_timeout(Some(Duration::new(wait_time_ms/1000,(wait_time_ms%1000) as u32))) {
@@ -881,7 +879,7 @@ impl Client {
 					});
 				}
 			} else {
-				let mut sha3 = Keccak::new_sha3_256();
+				let mut sha3 = Keccak::new_shake128();
 				sha3.update(&bottle);
 				sha3.finalize(&mut hash_bytes);
 				let decryption = self.identity.decrypt(&bottle);
@@ -931,28 +929,10 @@ impl Client {
 		if let Some(event) = self.event_stream.pop_front() {
 			return Ok(Some(event));
 		}
-		match self.get_packets() {
+		match self.process_packets() {
 			Err(why) => return Err(why),
 			Ok(_) => return Ok(self.event_stream.pop_front()),
 		};
-	}
-
-	pub fn get_packet(&mut self) -> Result<Option<Packet>,io::Error> {
-		if let Some(packet) = self.receive_queue.pop_front() {
-			return Ok(Some(packet));
-		}
-		match self.get_packets() {
-			Err(why) => return Err(why),
-			Ok(_) => return Ok(self.receive_queue.pop_front()),
-		};
-	}
-
-	pub fn clear_packet_queue(&mut self) {
-		self.receive_queue.clear();
-	}
-
-	pub fn clear_event_queue(&mut self) {
-		self.event_stream.clear();
 	}
 
 	// collect packets from the server and append them to our receive_queue. this function
@@ -960,7 +940,7 @@ impl Client {
 	// up after a set delay if it has been set to asynchronous mode. in asynchronous mode,
 	// the WouldBlock errors resulting from no new packets being available are suppressed,
 	// so they do not need to be handled in the implementation code.
-	pub fn get_packets(&mut self) -> Result<(),io::Error> {
+	pub fn process_packets(&mut self) -> Result<(),io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
 		let mut recv_count:usize = 0;
 		loop {
@@ -1163,7 +1143,6 @@ impl Client {
 								timestamp:now_utc(),
 							});
 						}
-						self.receive_queue.push_back(received_packet);
 					}
 				},
 			};
@@ -1198,7 +1177,7 @@ impl Client {
 			Ok(_) => (),
 		};
 		let mut packet_hash:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_sha3_256();
+		let mut sha3 = Keccak::new_shake128();
 		sha3.update(&bottle);
 		sha3.finalize(&mut packet_hash);
 		if parameter.len() > 0 && [b'>'].contains(&&parameter[0]) {
@@ -1568,7 +1547,6 @@ pub struct Server {
 	pub max_resend_tries:u64,
 	pub max_resend_failures:u64,
 	pub event_stream:VecDeque<Event>,
-	pub receive_queue:VecDeque<Packet>,
 	pub uptime:i64,
 	pub synchronous:bool,
 	pub time_tolerance_ms:i64,
@@ -1598,7 +1576,6 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				max_unsent_packets:32,
 				max_resend_tries:3,
 				max_resend_failures:1,
-				receive_queue:VecDeque::new(),
 				uptime:milliseconds_now(),
 				synchronous:true,
 				time_tolerance_ms:3000,
@@ -1667,7 +1644,7 @@ impl Server {
 		let mut parameter_bytes:Vec<u8> = Vec::new();
 		let mut payload_bytes:Vec<u8> = Vec::new();
 		let mut hash_bytes:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_sha3_256();
+		let mut sha3 = Keccak::new_shake128();
 		sha3.update(&bottle);
 		sha3.finalize(&mut hash_bytes);
 		if bottle.len() >= 40 {
@@ -1915,7 +1892,7 @@ impl Server {
 			Ok(_) => (),
 		};
 		let mut packet_hash:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_sha3_256();
+		let mut sha3 = Keccak::new_shake128();
 		sha3.update(&bottle);
 		sha3.finalize(&mut packet_hash);
 		self.event_stream.push_back(Event::SendPacket {
@@ -1942,32 +1919,14 @@ impl Server {
 		if let Some(event) = self.event_stream.pop_front() {
 			return Ok(Some(event));
 		}
-		match self.get_packets() {
+		match self.process_packets() {
 			Err(why) => return Err(why),
 			Ok(_) => return Ok(self.event_stream.pop_front()),
 		};
 	}
 
-	pub fn get_packet(&mut self) -> Result<Option<Packet>,io::Error> {
-		if let Some(packet) = self.receive_queue.pop_front() {
-			return Ok(Some(packet));
-		}
-		match self.get_packets() {
-			Err(why) => return Err(why),
-			Ok(_) => return Ok(self.receive_queue.pop_front()),
-		};
-	}
 
-	pub fn clear_packet_queue(&mut self) {
-		self.receive_queue.clear();
-	}
-
-	pub fn clear_event_queue(&mut self) {
-		self.event_stream.clear();
-	}
-
-
-	pub fn get_packets(&mut self) -> Result<(),io::Error> {
+	pub fn process_packets(&mut self) -> Result<(),io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
 		loop {
 			match self.socket.recv_from(&mut input_buffer) {
@@ -2026,7 +1985,7 @@ impl Server {
 							timestamp:now_utc(),
 						});
 						let mut packet_hash:Vec<u8> = vec![0;8];
-						let mut sha3 = Keccak::new_sha3_256();
+						let mut sha3 = Keccak::new_shake128();
 						sha3.update(&input_buffer[..receive_length]);
 						sha3.finalize(&mut packet_hash);
 						match self.send_packet(&server_id,&vec![0x15],&packet_hash,&vec![0;8],&source_address) {
@@ -2227,7 +2186,12 @@ impl Server {
 							},
 							(b'>',_) => {
 								if received_packet.valid {
-									self.receive_queue.push_back(received_packet);
+									// none of the basic error conditions (invalid packet, no parameter) will throw from relay_packet when called
+									// here; only true system failures to transmit.
+									match self.relay_packet(&received_packet) {
+										Err(why) => return Err(why),
+										Ok(_) => (),
+									};
 								} else {
 									self.event_stream.push_back(Event::InvalidMessage {
 										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
@@ -2343,11 +2307,7 @@ impl Server {
 		if packet.parameter.len() < 1 {
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay packet with missing parameter"));
 		}
-		let mut packet_hash:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_sha3_256();
-		sha3.update(&packet.raw);
-		sha3.finalize(&mut packet_hash);
-		if self.recent_packets.contains(&packet_hash) {
+		if self.recent_packets.contains(&packet.hash) {
 			self.event_stream.push_back(Event::HaltedMessage {
 				sender:String::from_utf8_lossy(&packet.sender).to_string(),
 				address:packet.source.clone(),
@@ -2403,7 +2363,7 @@ impl Server {
 									timestamp:milliseconds_now(),
 									tries:0,
 									source:packet.source.clone(),
-									origin_hash:packet_hash.clone(),
+									origin_hash:packet.hash.clone(),
 									destination:sub.address.clone(),
 									recipient:recipient.as_bytes().to_vec(),
 									parameter:packet.parameter.clone(),
@@ -2412,7 +2372,7 @@ impl Server {
 							}
 						},
 					};
-					self.recent_packets.push_back(packet_hash.clone());
+					self.recent_packets.push_back(packet.hash.clone());
 					while self.recent_packets.len() > self.max_recent_packets {
 						let _ = self.recent_packets.pop_front();
 					}
@@ -2440,7 +2400,7 @@ impl Server {
 			});
 		} 
 		let mut ack_payload:Vec<u8> = Vec::new();
-		ack_payload.append(&mut packet_hash.clone());
+		ack_payload.append(&mut packet.hash.clone());
 		ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
 		if send {
 			match self.send_packet(&server_id,&vec![0x06],&ack_payload,&packet.crypt_tag,&packet.source) {

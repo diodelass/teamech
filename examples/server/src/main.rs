@@ -1,4 +1,4 @@
-static VERSION:&str = "0.11.1 December 2018";
+static VERSION:&str = "0.12.1 December 2018";
 static MAIN_DIRECTORY:&str = "teamech/";
 static LOG_DIRECTORY:&str = "logs/server/";
 static KEY_DIRECTORY:&str = "keys/server/";
@@ -118,7 +118,7 @@ fn main() {
 			Ok(server) => server,
 		};
 		// set this server to asynchronous mode, with an idle rep rate of 10 Hz
-		match server.set_asynchronous(100) {
+		match server.set_asynchronous(1) {
 			Err(why) => eprintln!("Warning: Failed to set server to asynchronous mode: {}",why),
 			Ok(_) => (),
 		};
@@ -136,25 +136,14 @@ fn main() {
 		// processor loop does not break under ideal conditions and handles all standard functions.
 		'processor:loop {
 			// collect packets from clients, and append them to the server's receive_queue.
-			match server.get_packets() {
+			match server.process_packets() {
 				Err(why) => {
-					eprintln!("Failed to receive incoming packets: {}",why);
+					eprintln!("Failed to process incoming packets: {}",why);
 					error_count += 1;
 					last_error = milliseconds_now();
 				},
 				Ok(_) => (),
 			};
-			while let Some(packet) = server.receive_queue.pop_front() {
-				// relay every packet. the relay function will automatically refuse to send invalid packets.
-				match server.relay_packet(&packet) {
-					Err(why) => { 
-						eprintln!("Failed to relay packet: {}",why);
-						error_count += 1;
-						last_error = milliseconds_now();
-					},
-					Ok(_) => (),
-				};
-			}
 			match server.resend_unacked() {
 				Err(why) => {
 					eprintln!("Failed to resend unacknowledged packets: {}",why);
