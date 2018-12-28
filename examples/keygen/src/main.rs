@@ -1,12 +1,10 @@
 static VERSION:&str = "0.12.1 December 2018";
 
-#[macro_use]
-extern crate clap;
-
 use std::fs::File;
 use std::process;
 use std::io::prelude::*;
 use std::io;
+use std::env::args;
 
 fn bytes_to_hex(v:&[u8]) -> String {
 	let mut result:String = String::from("");
@@ -35,15 +33,22 @@ fn get_rand_bytes(buffer:&mut [u8]) -> Result<(),io::Error> {
 }
 
 fn main() {
-	let arguments = clap_app!(app =>
-		(name: "Teamech Identity File Generator")
-		(version: VERSION)
-		(author: "Ellie D.")
-		(about: "Generates identity key files to enable links between clients and servers..")
-		(@arg FILE: +required "Path to the file to which the identity data should be written.")
-		(@arg name: -n --name +takes_value "Name to use for this client.")
-		(@arg class: -c --class +takes_value "Main class to use for this client.")
-	).get_matches();
+	let env_args:Vec<String> = args().collect::<Vec<String>>();
+	let mut command = "";
+	if let Some(com) = env_args.first() {
+		command = &com;
+	}
+	if env_args.len() < 2 || env_args.contains(&"--help".to_owned()) || env_args.contains(&"-h".to_owned()) {
+		println!("Teamech identity file generator {}",VERSION);
+		println!("Generates identity files containing keys to be used for secure Teamech connections.");
+		println!("Ellie D. Martin-Eberhardt");
+		println!("Usage:");
+		println!("{} <FILE>",command);
+		println!("Example:");
+		println!("{} testkey.tmi",command);
+		return;
+	}
+	let filename = &env_args[1];
 	let mut file_text:Vec<u8> = Vec::new();
 	file_text.push(b'I');
 	let mut ibuffer:[u8;8] = [0;8];
@@ -60,16 +65,16 @@ fn main() {
 	}
 	file_text.push(b'\n');
 	file_text.push(b'@');
-	for byte in arguments.value_of("name").unwrap_or("unset_name").as_bytes().iter() {
+	for byte in b"example_name".iter() {
 		file_text.push(*byte);
 	}
 	file_text.push(b'\n');
 	file_text.push(b'#');
-	for byte in arguments.value_of("class").unwrap_or("unset_class").as_bytes().iter() {
+	for byte in b"example_class".iter() {
 		file_text.push(*byte);
 	}
 	file_text.push(b'\n');
-	let mut output_file:File = match File::create(&arguments.value_of("FILE").expect("could not parse command line arguments")) {
+	let mut output_file:File = match File::create(&filename) {
 		Err(why) => {
 			eprintln!("Could not create specified file: {}",why);
 			process::exit(1);
