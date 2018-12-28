@@ -10,12 +10,8 @@ use termion::cursor;
 use termion::clear;
 use termion::color::*;
 
-#[macro_use]
-extern crate clap;
-
 extern crate teamech;
 
-use std::process::exit;
 use std::io::prelude::*;
 use std::io::{stdout,Stdout};
 use std::time::Duration;
@@ -24,6 +20,8 @@ use std::net::IpAddr;
 //use std::fs::File;
 use std::path::Path;
 use std::fmt::Display;
+use std::env::args;
+use std::collections::HashMap;
 
 struct Terminal {
 	stdin_events: Events<termion::AsyncReader>,
@@ -506,21 +504,68 @@ impl Terminal {
 }
 
 fn main() {
-	// get command line arguments
-	let arguments = clap_app!(app =>
-		(name: "Teamech Console")
-		(version: VERSION)
-		(author: "Ellie D. Martin-Eberhardt")
-		(about: "Terminal client for the Teamech protocol.")
-		(@arg ADDRESS: +required "Remote address to contact.")
-		(@arg KEY: +required "Identity file to use for encryption/decryption (must be matched by a duplicate file registered on the server).")
-		(@arg port: -p --port +takes_value "Remote port on which to contact the server.")
-		(@arg localport: -l --localport +takes_value "UDP port to bind to locally (automatic if unset).")
-		(@arg showraw: -a --showraw "show local and remote acknowledge messages.")
-		(@arg showall: -v --verbose "show all event types.")
-		(@arg showhex: -h --showhex "Show hexadecimal values of messages (useful if working with binary messages).")
-		(@arg ipv4: -i --ipv4 "Use IPv4 instead of IPv6.") 
-	).get_matches();
+	let env_args:Vec<String> = args().collect::<Vec<String>>();
+	let valued_flags:Vec<char> = vec!['p','l'];
+	let valued_switches:Vec<&str> = vec!["port","localport"];
+	let mut flags:Vec<char> = Vec::new();
+	let mut switches:Vec<&str> = Vec::new();
+	let mut arguments:Vec<&str> = Vec::new();
+	let mut command:&str = "";
+	let mut flags_seeking_values:Vec<char> = Vec::new();
+	let mut switches_seeking_values:Vec<&str> = Vec::new();
+	let mut flag_values:HashMap<char,&str> = HashMap::new();
+	let mut switch_values:HashMap<&str,&str> = HashMap::new();
+	for i in 0..env_args.len() {
+		if i == 0 {
+			command = &env_args[i];
+		} else if env_args[i].starts_with("--") {
+			let switch = env_args[i].trim_matches('-');
+			if valued_switches.contains(&switch) {
+				switches_seeking_values.insert(0,&switch);
+			}
+			switches.push(&switch);
+		} else if env_args[i].starts_with("-") {
+			for c in env_args[i].trim_matches('-').chars() {
+				if valued_flags.contains(&c) {
+					flags_seeking_values.insert(0,c);
+				}
+				flags.push(c);
+			}
+		} else if let Some(valued_flag) = flags_seeking_values.pop() {
+			flag_values.insert(valued_flag,&env_args[i]);
+		} else if let Some(valued_switch) = switches_seeking_values.pop() {
+			switch_values.insert(valued_switch,&env_args[i]);
+		} else {
+			arguments.push(&env_args[i]);
+		}
+	}
+	let help_flag:bool = flags.contains(&'h') || switches.contains(&"help");
+	let too_many_arguments:bool = arguments.len() > 2;
+	let too_few_arguments:bool = arguments.len() < 2;
+	let unvalued_flags:bool = switches_seeking_values.len()+flags_seeking_values.len() > 0;
+	if help_flag || too_many_arguments || too_few_arguments || unvalued_flags {
+		if help_flag {
+			println!("Teamech Console {}",VERSION);
+			println!("Terminal client for the Teamech protocol");
+			println!("Ellie D. Martin-Eberhardt");
+		} else if too_many_arguments {
+			println!("One or more of the specified arguments were not understood.");
+		} else if too_few_arguments {
+			println!("One or more required arguments were not provided.");
+		} else if unvalued_flags {
+			println!("One or more of the specified flags requires a value, but no value was found.");
+		}
+		println!("Usage:");
+		println!("{} <ADDRESS> <IDENTITY FILE> [OPTIONS]",command);
+		println!("Overview of options:");
+		println!("ADDRESS: IP address of the remote server to connect to.");
+		println!("IDENTITY FILE: Identity file to use for authentication (must correspond to a duplicate file registered on the server).");
+		println!("-p, --port <number>: Remote UDP port number to connect to on the remote server.");
+		println!("-l, --localport <number>: Local UDP port to use for sending and receiving data.");
+		println!("-a --showraw: Show raw packet sends and receives in addition to relevant events.");
+		println!("-v --verbose: Show all raw packet events and debugging information.");
+		return;
+	}
 	// set up the terminal window
 	let mut term = init_term();
 	term.clear_window();
@@ -530,29 +575,42 @@ fn main() {
 	// recovery: catches breaks from 'processor. break to quit the client. 
 	'recovery:loop {
 		// extract parameters from command line arguments
-		let local_port:u16 = match arguments.value_of("localport").unwrap_or("0").parse::<u16>() {
+		let mut local_port_arg:&str = "0";
+		if let Some(port) = flag_values.get(&'l') {
+			local_port_arg = port;
+		} else if let Some(port) = switch_values.get(&"localport") {
+			local_port_arg = port;
+		}
+		let local_port:u16 = match local_port_arg.parse::<u16>() {
 			Err(why) => {
 				term.console_error("Failed to parse given port number as an integer. See --help for help.");
 				term.console_error(&format!("{}",why));
-				exit(1);
+				break 'recovery;
 			},
 			Ok(n) => n,
 		};
-		let remote_port:u16 = match arguments.value_of("port").unwrap_or("3840").parse::<u16>() {
+		let mut remote_port_arg:&str = "3840";
+		if let Some(port) = flag_values.get(&'p') {
+			remote_port_arg = port;
+		} else if let Some(port) = switch_values.get(&"port") {
+			remote_port_arg = port;
+		}
+		let remote_port:u16 = match remote_port_arg.parse::<u16>() {
 			Err(why) => {
 				term.console_error("Failed to parse given port number as an integer. See --help for help.");
 				term.console_error(&format!("{}",why));
-				exit(1);
+				break 'recovery;
 			},
 			Ok(n) => n,
 		};
 		// it's okay to .expect this, instead of matching it, because clap is supposed to handle telling the user what's wrong if they miss
 		// a required argument.
-		let key_location:&Path = Path::new(arguments.value_of("KEY").expect("failed to get command line argument for identity filename"));
-		let server_address:IpAddr = match (&arguments.value_of("ADDRESS").expect("failed to get command line argument for address")).parse::<IpAddr>() {
-			Err(why) => {
-				term.console_error(&format!("Could not parse first argument as an IP address: {}",why));
-				exit(1);
+		let key_location:&Path = Path::new(arguments[1]);
+		let address_field = arguments[0];
+		let server_address:IpAddr = match address_field.parse::<IpAddr>() {
+			Err(_why) => {
+				term.console_error("Failed to parse target address: is this an IP address?");
+				break 'recovery;
 			},
 			Ok(addr) => addr,
 		};
@@ -560,7 +618,7 @@ fn main() {
 		let mut teamech_client = match teamech::new_client(&key_location,&server_address,remote_port,local_port) {
 			Err(why) => {
 				term.console_error(&format!("Failed to instantiate client: {}",why));
-				exit(1);
+				break 'recovery;
 			},
 			Ok(client) => client,
 		};
@@ -568,7 +626,7 @@ fn main() {
 		match teamech_client.set_asynchronous(1) {
 			Err(why) => {
 				term.console_error(&format!("teamech-console: could not set client to asynchronous (nonblocking) mode: {}",why));
-				exit(1);
+				break 'recovery;
 			},
 			Ok(_) => (),
 		};
@@ -583,7 +641,7 @@ fn main() {
 				for _ in 0..20 {
 					sleep(Duration::new(0,100_000_000));
 					if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
-						exit(1);
+						break 'recovery;
 					}
 				}
 				continue 'recovery;
@@ -600,7 +658,7 @@ fn main() {
 					for _ in 0..20 {
 						sleep(Duration::new(0,100_000_000));
 						if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
-							exit(1);
+							break 'recovery;
 						}
 					}
 					break 'processor;
@@ -626,7 +684,7 @@ fn main() {
 						time = "";
 						event_text = &event_string;
 					}
-					let showraw:bool = arguments.is_present("showraw") || arguments.is_present("showall");
+					let showraw:bool = switches.contains(&"showraw") || switches.contains(&"verbose") || flags.contains(&'a') || flags.contains(&'v');
 					match net_event {
 						teamech::Event::Acknowledge {timestamp:_,sender:_,address:_,hash:_,matches:_} => {
 							term.console_netevent_color(Fg(Magenta),date,time,event_text);
@@ -676,7 +734,7 @@ fn main() {
 					for _ in 0..20 {
 						sleep(Duration::new(0,100_000_000));
 						if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
-							exit(1);
+							break 'recovery;
 						}
 					}
 					break 'processor;

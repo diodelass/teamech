@@ -7,4 +7,3 @@ authors = ["Ellie D. <sporillium@gmail.com>"]
 teamech = { path = "../.." }
 termion = "*"
 time = "*"
-clap = "*"
