@@ -1,14 +1,11 @@
 static VERSION:&str = "0.12.1 December 2018";
 static MAIN_DIRECTORY:&str = "teamech/";
-static LOG_DIRECTORY:&str = "logs/server/";
-static KEY_DIRECTORY:&str = "keys/server/";
+static LOG_DIRECTORY:&str = "logs/";
+static KEY_DIRECTORY:&str = "keys/";
 static ERROR_THRESHOLD:u64 = 10;
 static ERROR_DECAY_TIME:i64 = 5000;
 
 extern crate teamech;
-
-#[macro_use]
-extern crate clap;
 
 extern crate time;
 use time::{now_utc,Timespec};
@@ -19,6 +16,8 @@ use std::io;
 use std::io::prelude::*;
 use std::fs;
 use std::fs::File;
+use std::env::args;
+use std::collections::HashMap;
 
 fn milliseconds_now() -> i64 {
 	let now:Timespec = now_utc().to_timespec();
@@ -73,19 +72,73 @@ impl Logger {
 }
 
 fn main() {
-	// use Clap to obtain command-line arguments
-	let arguments = clap_app!(app =>
-		(name: "Teamech Server")
-		(version: VERSION)
-		(author: "Ellie D.")
-		(about: "Server for the Teamech protocol.")
-		(@arg logs: -l --logdir +takes_value "Path to directory where logs files should be stored.")
-		(@arg keys: -k --iddir +takes_value "Path to directory where identity files are stored.")
-		(@arg port: -p --port +takes_value "Local port number on which to listen for incoming data.")
-		(@arg name: -n --name +takes_value "Unique name to identify this server to other servers.")
-	).get_matches();
+	let env_args:Vec<String> = args().collect::<Vec<String>>();
+	let valued_flags:Vec<char> = vec!['p','n'];
+	let valued_switches:Vec<&str> = vec!["port","name"];
+	let mut flags:Vec<char> = Vec::new();
+	let mut switches:Vec<&str> = Vec::new();
+	let mut arguments:Vec<&str> = Vec::new();
+	let mut command:&str = "";
+	let mut flags_seeking_values:Vec<char> = Vec::new();
+	let mut switches_seeking_values:Vec<&str> = Vec::new();
+	let mut flag_values:HashMap<char,&str> = HashMap::new();
+	let mut switch_values:HashMap<&str,&str> = HashMap::new();
+	for i in 0..env_args.len() {
+		if i == 0 {
+			command = &env_args[i];
+		} else if env_args[i].starts_with("--") {
+			let switch = env_args[i].trim_matches('-');
+			if valued_switches.contains(&switch) {
+				switches_seeking_values.insert(0,&switch);
+			}
+			switches.push(&switch);
+		} else if env_args[i].starts_with("-") {
+			for c in env_args[i].trim_matches('-').chars() {
+				if valued_flags.contains(&c) {
+					flags_seeking_values.insert(0,c);
+				}
+				flags.push(c);
+			}
+		} else if let Some(valued_flag) = flags_seeking_values.pop() {
+			flag_values.insert(valued_flag,&env_args[i]);
+		} else if let Some(valued_switch) = switches_seeking_values.pop() {
+			switch_values.insert(valued_switch,&env_args[i]);
+		} else {
+			arguments.push(&env_args[i]);
+		}
+	}
+	let help_flag:bool = flags.contains(&'h') || switches.contains(&"help");
+	let too_many_arguments:bool = arguments.len() > 0;
+	//let too_few_arguments:bool = arguments.len() < 0;
+	let unvalued_flags:bool = switches_seeking_values.len()+flags_seeking_values.len() > 0;
+	if help_flag || too_many_arguments || unvalued_flags { //  || too_few_arguments {
+		if help_flag {
+			println!("Teamech Server {}",VERSION);
+			println!("Server for the Teamech protocol");
+			println!("Ellie D. Martin-Eberhardt");
+		} else if too_many_arguments {
+			println!("One or more of the specified arguments were not understood.");
+		//} else if too_few_arguments {
+		//	println!("One or more required arguments were not provided.");
+		} else if unvalued_flags {
+			println!("One or more of the specified flags requires a value, but no value was found.");
+		}
+		println!("Usage:");
+		println!("{} [OPTIONS]",command);
+		println!("Overview of options:");
+		println!("-p, --port <number>: Remote UDP port number to connect to on the remote server.");
+		println!("-n, --name <name>: Name of this server to present to clients.");
+		println!("-v --verbose: Show all debugging information.");
+		return;
+	}
 	// parse values from arguments
-	let port_number:u16 = match arguments.value_of("port").unwrap_or("3840").parse::<u16>() {
+	let mut port_arg:&str = "3840";
+	if let Some(port) = flag_values.get(&'p') {
+		port_arg = port;
+	} else if let Some(port) = switch_values.get(&"port") {
+		port_arg = port;
+	}
+	let port_number:u16 = match port_arg.parse::<u16>() {
 		Err(why) => {
 			eprintln!("Failed to parse given port number as an integer. See --help for help.");
 			eprintln!("{}",why);
@@ -94,19 +147,17 @@ fn main() {
 		Ok(n) => n,
 	};
 	let home_dir:PathBuf = Path::new(".").to_owned();
-	let identity_dir:PathBuf = match arguments.value_of("keys") {
-		None => (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&KEY_DIRECTORY))).to_owned(),
-		Some(pathvalue) => Path::new(&pathvalue).to_owned(),
-	};
-
-	let log_dir:PathBuf = match arguments.value_of("logs") {
-		None => (home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&LOG_DIRECTORY))).to_owned(),
-		Some(pathvalue) => Path::new(&pathvalue).to_owned(),
-	};
+	let identity_dir:PathBuf = home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&KEY_DIRECTORY)).to_owned();
+	let log_dir:PathBuf = home_dir.join(Path::new(&MAIN_DIRECTORY)).join(Path::new(&LOG_DIRECTORY)).to_owned();
 	let logger:Logger = Logger {
 		log_file_path:log_dir.join(Path::new(&format!("{}-teamech-server.log",now_utc().rfc3339()))),
 	};
-	let server_name:&str = arguments.value_of("name").unwrap_or("server");
+	let mut server_name:&str = "server";
+	if let Some(name) = flag_values.get(&'n') {
+		server_name = name;
+	} else if let Some(name) = switch_values.get(&"name") {
+		server_name = name;
+	}
 	// recovery loop handles basic stateful setup of server initially, and catches breaks from the processor loop.
 	'recovery:loop {
 		// initialize a new server object with the arguments collected from the command line.

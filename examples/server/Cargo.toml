@@ -5,5 +5,4 @@ authors = ["Ellie D. <sporillium@gmail.com>"]
 
 [dependencies]
 teamech = { path = "../.." }
-clap = "2"
 time = "0.1"
