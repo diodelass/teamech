@@ -191,11 +191,14 @@ fn view_bytes(v:&[u8]) -> String {
 // - a malformed or unparseable pattern will return false
 // - words containing boolean operators cannot be matched and should not be included
 fn wordmatch(pattern:&str,input:&str) -> bool {
-	if pattern == "" || input.contains(&pattern) {
+	if pattern == "" {
 		// handle true-returning edge cases first, for speed
 		return true;
 	}
 	let paddedinput:&str = &format!(" {} ",input);
+	if paddedinput.contains(&format!(" {} ",pattern)) {
+		return true;
+	}
 	let ops:Vec<&str> = vec!["/","!","&","|","^","(",")"];
 	let mut spacedpattern:String = String::from(pattern);
 	let mut boolpattern:String = String::new();
@@ -771,6 +774,7 @@ pub struct UnackedPacket {
 // object representing a Teamech client, with methods for sending and receiving packets.
 pub struct Client {
 	pub socket:UdpSocket,																// local socket for transceiving data
+	pub address:SocketAddr,
 	pub server_address:SocketAddr,											// address of server we're subscribed to
 	pub identity:Identity,
 	pub subscribed:bool,																// are we subscribed?
@@ -804,6 +808,7 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 			let addr = socket.local_addr().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)),0));
 			let mut created_client = Client {
 				socket:socket,
+				address:addr.clone(),
 				server_address:server_socket_address,
 				event_stream:VecDeque::new(),
 				last_number_matched:VecDeque::new(),
@@ -1532,6 +1537,7 @@ pub struct ServerLink {
 // server object for holding server parameters and subscriptions.
 pub struct Server {
 	pub name:String,
+	pub address:SocketAddr,
 	pub socket:UdpSocket,
 	pub identities:HashMap<Vec<u8>,Identity>,
 	pub identities_in_use:HashSet<Vec<u8>>,
@@ -1561,6 +1567,7 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 			let addr = socket.local_addr().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)),0));
 			let mut created_server = Server {
 				name:name.to_owned(),
+				address:addr.clone(),
 				socket:socket,
 				subscribers:HashMap::new(),
 				identities:HashMap::new(),
@@ -2071,11 +2078,13 @@ impl Server {
 									match_count_bytes.copy_from_slice(&received_packet.payload[8..]);
 									ack_matches = bytes_to_u64(&match_count_bytes);
 									if let Some(origin) = ack_origin {
-										if let Some(sub) = self.subscribers.clone().get(&origin) {
-											match self.send_packet(&ack_sender,&vec![0x06],&ack_origin_payload,&sub.identity.tag,&origin) {
-												Err(why) => return Err(why),
-												Ok(_) => (),
-											};
+										if origin != self.address {
+											if let Some(sub) = self.subscribers.clone().get(&origin) {
+												match self.send_packet(&ack_sender,&vec![0x06],&ack_origin_payload,&sub.identity.tag,&origin) {
+													Err(why) => return Err(why),
+													Ok(_) => (),
+												};
+											}
 										}
 									}
 								}
@@ -2353,6 +2362,12 @@ impl Server {
 						payload:packet.payload.clone(),
 						timestamp:now_utc(),
 					});
+					let unack_source:SocketAddr;
+					if matched {
+						unack_source = packet.source.clone();
+					} else {
+						unack_source = self.address.clone();
+					}
 					match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&sub.identity.tag,&sub.address) {
 						Err(why) => return Err(why),
 						Ok(hash) => {
@@ -2362,7 +2377,7 @@ impl Server {
 									decrypted:packet.decrypted.clone(),
 									timestamp:milliseconds_now(),
 									tries:0,
-									source:packet.source.clone(),
+									source:unack_source,
 									origin_hash:packet.hash.clone(),
 									destination:sub.address.clone(),
 									recipient:recipient.as_bytes().to_vec(),
