@@ -39,7 +39,7 @@ II. Server
 		1. To all clients												[X]
 		2. To specific clients									[X]
 		3. To sets of clients										[X]
-		4. To other servers											[X]
+		4. To other servers											[-]
 		5. Handling acknowledgements						[X]
 			a. Resending													[X]
 			b. Relaying acks back to source				[X]
@@ -62,6 +62,40 @@ V. Logging																	[X]
 	A. Log Events															[X]
 	B. Log Event Classification								[X]
 
+*/
+
+/* Overview of Control Codes
+0x01 - START OF HEADING - Unassigned
+0x02 - START OF TEXT - Connection request
+0x03 - END OF TEXT - Match test response
+0x04 - END OF TRANSMISSION - Connected client list response
+0x05 - ENQUIRY - Connected client list request
+0x06 - ACKNOWLEDGE - Acknowledge
+0x07 - BELL
+0x08 - BACKSPACE
+0x09 - CHARACTER TABULATION
+0x0A - LINE FEED
+0x0B - LINE TABULATION
+0x0C - FORM FEED
+0x0D - CARRIAGE RETURN
+0x0E - SHIFT OUT - Supervisory disconnect notification
+0x0F - SHIFT IN - Supervisory connect notification
+0x10 - DATA LINK ESCAPE - Unassigned
+0x11 - DEVICE CONTROL ONE - Unassigned
+0x12 - DEVICE CONTROL TWO - Unassigned
+0x13 - DEVICE CONTROL THREE - Unassigned 
+0x14 - DEVICE CONTROL FOUR - Unassigned
+0x15 - NEGATIVE ACKNOWLEDGE - Refusal
+0x16 - SYNCHRONOUS IDLE - Unassigned
+0x17 - END OF TRANSMISSION BLOCK - Unassigned
+0x18 - CANCEL - Connection cancellation
+0x19 - END OF MEDIUM - Connection dismissal
+0x1A - SUBSTITUTE - Unassigned
+0x1B - ESCAPE - Unassigned
+0x1C - FILE SEPARATOR - Unassigned
+0x1D - GROUP SEPARATOR - Unassigned
+0x1E - RECORD SEPARATOR - Unassigned
+0x1F - UNIT SEPARATOR - Unassigned
 */
 
 extern crate tiny_keccak;
@@ -394,38 +428,8 @@ pub enum Event {
 		reason:String,
 		timestamp:Tm,
 	},
-	ServerUnsubscribeFailure {
-		// we're a server, and something went wrong while trying to unsubscribe a client.
-		sender:String,
-		address:SocketAddr,
-		reason:String,
-		timestamp:Tm,
-	},
 	ClientUnsubscribeFailure {
 		// we're a client, and something went wrong while unsubscribing.
-		address:SocketAddr,
-		reason:String,
-		timestamp:Tm,
-	},
-	ServerLink {
-		// we're a server, and have just linked to another server.
-		address:SocketAddr,
-		timestamp:Tm,
-	},
-	ServerLinkFailure {
-		// we're a server, and have failed to link to another server for some reason.
-		address:SocketAddr,
-		reason:String,
-		timestamp:Tm,
-	},
-	ServerUnlink {
-		// we're a server, and we've just closed the link to another server.
-		address:SocketAddr,
-		reason:String,
-		timestamp:Tm,
-	},
-	ServerUnlinkFailure {
-		// we're a server, and something went wrong during the process of unlinking from another server.
 		address:SocketAddr,
 		reason:String,
 		timestamp:Tm,
@@ -622,9 +626,6 @@ impl Event {
 			Event::ServerUnsubscribe {timestamp,sender,address,reason} => {
 				return format!("[{}] Connection closed for {} [{}] ({})",&print_time(&timestamp),&sender,&address,&reason);
 			},
-			Event::ServerUnsubscribeFailure {timestamp,sender,address,reason} => {
-				return format!("[{}] Failed to close subscription for {} [{}]: {}",&print_time(&timestamp),&sender,&address,&reason);
-			},
 			Event::ClientSubscribe {timestamp,sender,address} => {
 				return format!("[{}] Subscribed to server {} at [{}]",&print_time(&timestamp),&sender,&address);
 			},
@@ -636,18 +637,6 @@ impl Event {
 			},
 			Event::ClientUnsubscribeFailure {timestamp,address,reason} => {
 				return format!("[{}] Failed to disconnect from server at [{}]: {}",&print_time(&timestamp),&address,&reason);
-			},
-			Event::ServerLink {timestamp,address} => {
-				return format!("[{}] Linked to server at [{}]",&print_time(&timestamp),&address);
-			},
-			Event::ServerLinkFailure {timestamp,address,reason} => {
-				return format!("[{}] Could not link to server at [{}]: {}",&print_time(&timestamp),&address,&reason);
-			},
-			Event::ServerUnlink {timestamp,address,reason} => {
-				return format!("[{}] Unlinked from server at [{}] ({})",&print_time(&timestamp),&address,&reason);
-			},
-			Event::ServerUnlinkFailure {timestamp,address,reason} => {
-				return format!("[{}] Failed to unlink from server at [{}]: {}",&print_time(&timestamp),&address,&reason);
 			},
 			Event::ReceivePacket {timestamp,sender,address,parameter,payload,hash} => {
 				return format!("[{}] recv({} [{}]): [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
@@ -705,8 +694,8 @@ impl Event {
 			Event::ClientListRequest {timestamp,sender,address} => {
 				return format!("[{}] client list requested by {} [{}]",&print_time(&timestamp),&sender,&address);
 			},
-			Event::ClientListResponse {timestamp,sender,address,payload} => {
-				return format!("[{}] client list - {} [{}]: {}",&print_time(&timestamp),&sender,&address,&payload);
+			Event::ClientListResponse {timestamp,sender:_,address:_,payload} => {
+				return format!("[{}] client list - {}",&print_time(&timestamp),&payload);
 			},
 			Event::ClientListEnd {timestamp,sender,address} => {
 				return format!("[{}] end of client list from {} [{}]",&print_time(&timestamp),&sender,&address);
@@ -950,7 +939,9 @@ impl Client {
 		let mut recv_count:usize = 0;
 		loop {
 			recv_count += 1;
-			if recv_count > 10000 {
+			if recv_count > 10000 || self.event_stream.len() > 1000 {
+				// if we're processing a huge volume of packets at once, occasionally take a break
+				// to allow other functions to run.
 				break;
 			}
 			match self.socket.recv_from(&mut input_buffer) {
@@ -1090,6 +1081,29 @@ impl Client {
 										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
 										address:received_packet.source.clone(),
 										hash:received_packet.payload.to_vec(),
+										timestamp:now_utc(),
+									});
+								},
+								(0x0F,0) => {
+									self.event_stream.push_back(Event::ServerSubscribe {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										timestamp:now_utc(),
+									});
+								},
+								(0x0F,_) => {
+									self.event_stream.push_back(Event::ServerSubscribeFailure {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										reason:String::from_utf8_lossy(&received_packet.payload).to_string(),
+										timestamp:now_utc(),
+									});
+								},
+								(0x0E,_) => {
+									self.event_stream.push_back(Event::ServerUnsubscribe {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										address:received_packet.source.clone(),
+										reason:String::from_utf8_lossy(&received_packet.payload).to_string(),
 										timestamp:now_utc(),
 									});
 								},
@@ -1527,13 +1541,6 @@ pub struct Subscription {
 	pub delivery_failures:u64,															// number of times a packet delivery has failed
 }
 
-#[derive(Clone)]
-pub struct ServerLink {
-	pub address:SocketAddr,
-	pub uptime:i64,
-	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,
-}
-
 // server object for holding server parameters and subscriptions.
 pub struct Server {
 	pub name:String,
@@ -1542,7 +1549,6 @@ pub struct Server {
 	pub identities:HashMap<Vec<u8>,Identity>,
 	pub identities_in_use:HashSet<Vec<u8>>,
 	pub subscribers:HashMap<SocketAddr,Subscription>,
-	pub linked_servers:HashMap<SocketAddr,ServerLink>,
 	pub max_subscribers:usize,
 	pub ban_points:HashMap<IpAddr,u64>,
 	pub max_ban_points:u64,
@@ -1572,7 +1578,6 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				subscribers:HashMap::new(),
 				identities:HashMap::new(),
 				identities_in_use:HashSet::new(),
-				linked_servers:HashMap::new(),
 				max_subscribers:1024,
 				ban_points:HashMap::new(),
 				max_ban_points:10,
@@ -1761,9 +1766,6 @@ impl Server {
 					if let Some(sub) = self.subscribers.get_mut(&source_address) {
 						let _ = sub.unacked_packets.remove(&received_packet.hash);
 					}
-					if let Some(serv) = self.linked_servers.get_mut(&source_address) {
-						let _ = serv.unacked_packets.remove(&received_packet.hash);
-					}
 					if received_packet.parameter.len() > 0 && &source_address == target_address {
 						if target_parameters.contains(&received_packet.parameter[0]) {
 							response_payload = received_packet.payload.clone();
@@ -1789,72 +1791,6 @@ impl Server {
 			Ok(_) => (),
 		};
 		return Ok(response_payload);
-	}
-
-	pub fn link_server(&mut self,remote_address:&SocketAddr,crypt_tag:&Vec<u8>) -> Result<(),io::Error> {
-		let mut nonce_bytes:Vec<u8> = vec![0;8];
-		match get_rand_bytes(&mut nonce_bytes[..]) {
-			Err(why) => return Err(why),
-			Ok(_) => (),
-		};
-		match self.send_packet(&vec![],&vec![0x02],&nonce_bytes,&crypt_tag,&remote_address) {
-			Err(why) => {
-				self.event_stream.push_back(Event::ServerLinkFailure {
-					address:remote_address.clone(),
-					reason:format!("{}",why),
-					timestamp:now_utc(),
-				});
-				return Err(why);
-			},
-			Ok(_) => (),
-		};
-		match self.get_response(&vec![0x02,0x06],&remote_address) {
-			Err(why) => {
-				self.event_stream.push_back(Event::ServerLinkFailure {
-					address:remote_address.clone(),
-					reason:format!("{}",why),
-					timestamp:now_utc(),
-				});
-				return Err(why);
-			},
-			Ok(_) => (),
-		};
-		self.linked_servers.insert(remote_address.clone(),ServerLink {
-			address:remote_address.clone(),
-			uptime:milliseconds_now(),
-			unacked_packets:HashMap::new(),
-		});	
-		self.event_stream.push_back(Event::ServerLink {
-			address:remote_address.clone(),
-			timestamp:now_utc(),
-		});
-		return Ok(());
-	}
-
-	// 
-	pub fn unlink_server(&mut self,crypt_tag:Vec<u8>,remote_address:&SocketAddr) -> Result<(),io::Error> {
-		match self.send_packet(&vec![],&vec![0x18],&vec![],&crypt_tag,&remote_address) {
-			Err(why) => {
-				self.event_stream.push_back(Event::ServerUnlinkFailure {
-					address:remote_address.clone(),
-					reason:format!("{}",why),
-					timestamp:now_utc(),
-				});
-				return Err(why);
-			},
-			Ok(_) => (),
-		};
-		for sub in self.linked_servers.clone().iter() {
-			if sub.0 == remote_address {
-				let _ = self.linked_servers.remove(&sub.0);
-			}
-		}
-		self.event_stream.push_back(Event::ServerUnlink {
-			address:remote_address.clone(),
-			reason:String::from("link terminated locally"),
-			timestamp:now_utc(),
-		});
-		return Ok(());
 	}
 
 	// encrypts and transmits a packet, much like the client version.
@@ -2010,8 +1946,7 @@ impl Server {
 						hash:received_packet.hash.clone(),
 						timestamp:now_utc(),
 					});
-					if !self.subscribers.contains_key(&source_address) 
-					&& !self.linked_servers.contains_key(&source_address) {
+					if !self.subscribers.contains_key(&source_address) {
 					// && received_packet.payload.len() >= 8 { 
 					// && received_packet.parameter == vec![0x02] {
 						if received_packet.valid && self.subscribers.len() < self.max_subscribers {
@@ -2027,11 +1962,21 @@ impl Server {
 								Err(why) => return Err(why),
 								Ok(_) => (),
 							};
+							let sender_id:String = String::from_utf8_lossy(&received_packet.sender).to_string();
 							self.event_stream.push_back(Event::ServerSubscribe {
-								sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+								sender:sender_id.clone(),
 								address:source_address.clone(),
 								timestamp:now_utc(),
 							});
+							let sender_addr_bytes:Vec<u8> = format!("{} [{}]",sender_id,source_address).as_bytes().to_vec();
+							for sub in self.subscribers.clone().values() {
+								if sub.identity.classes.contains(&String::from("supervisor")) {
+									match self.send_packet(&sender_addr_bytes,&vec![0x0F],&vec![],&sub.identity.tag,&sub.address) {
+										Err(why) => return Err(why),
+										Ok(_) => (),
+									};
+								}
+							}
 						} else {
 							match self.send_packet(&server_id,&vec![0x15],&received_packet.hash,&received_packet.crypt_tag,&source_address) {
 								Err(why) => return Err(why),
@@ -2046,12 +1991,23 @@ impl Server {
 							} else if self.subscribers.len() >= self.max_subscribers {
 								reject_reason = "server full";
 							}
+							let sender_id:String = String::from_utf8_lossy(&received_packet.sender).to_string();
 							self.event_stream.push_back(Event::ServerSubscribeFailure {
-								sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+								sender:sender_id.clone(),
 								address:source_address.clone(),
 								reason:reject_reason.to_owned(),
 								timestamp:now_utc(),
 							});
+							let sender_addr_bytes:Vec<u8> = format!("{} [{}]",sender_id,source_address).as_bytes().to_vec();
+							let reason_bytes:Vec<u8> = reject_reason.as_bytes().to_vec();
+							for sub in self.subscribers.clone().values() {
+								if sub.identity.classes.contains(&String::from("supervisor")) {
+									match self.send_packet(&sender_addr_bytes,&vec![0x0F],&reason_bytes,&sub.identity.tag,&sub.address) {
+										Err(why) => return Err(why),
+										Ok(_) => (),
+									};
+								}
+							}
 						}
 					}
 					if received_packet.parameter.len() > 0 {
@@ -2124,12 +2080,23 @@ impl Server {
 									Err(why) => return Err(why),
 									Ok(_) => (),
 								};
+								let sender_id:String = String::from_utf8_lossy(&received_packet.sender).to_string();
 								self.event_stream.push_back(Event::ServerUnsubscribe {
-									sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+									sender:sender_id.clone(),
 									address:source_address.clone(),
 									reason:String::from("connection terminated by remote client"),
 									timestamp:now_utc(),
 								});
+								let sender_addr_bytes:Vec<u8> = format!("{} [{}]",sender_id,source_address).as_bytes().to_vec();
+								let reason_bytes:Vec<u8> = b"connection terminated by remote client".to_vec();
+								for sub in self.subscribers.clone().values() {
+									if sub.identity.classes.contains(&String::from("supervisor")) {
+										match self.send_packet(&sender_addr_bytes,&vec![0x0E],&reason_bytes,&sub.identity.tag,&sub.address) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+									}
+								}
 							},
 							(0x05,0) => {
 								let subscribers_snapshot = self.subscribers.clone();
@@ -2246,6 +2213,16 @@ impl Server {
 					reason:String::from("maximum send queue length exceeded"),
 					timestamp:now_utc(),
 				});
+				let sender_addr_bytes:Vec<u8> = format!("{} [{}]",client_name,sub.address).as_bytes().to_vec();
+				let reason_bytes:Vec<u8> = b"maximum send queue length exceeded".to_vec();
+				for othersub in self.subscribers.clone().values() {
+					if othersub.identity.classes.contains(&String::from("supervisor")) {
+						match self.send_packet(&sender_addr_bytes,&vec![0x0E],&reason_bytes,&othersub.identity.tag,&othersub.address) {
+							Err(why) => return Err(why),
+							Ok(_) => (),
+						};
+					}
+				}
 				continue;
 			}
 			if sub.delivery_failures > self.max_resend_failures {
@@ -2263,6 +2240,16 @@ impl Server {
 					reason:String::from("maximum resend failure count exceeded"),
 					timestamp:now_utc(),
 				});
+				let sender_addr_bytes:Vec<u8> = format!("{} [{}]",client_name,sub.address).as_bytes().to_vec();
+				let reason_bytes:Vec<u8> = b"maximum resend failure count exceeded".to_vec();
+				for othersub in self.subscribers.clone().values() {
+					if othersub.identity.classes.contains(&String::from("supervisor")) {
+						match self.send_packet(&sender_addr_bytes,&vec![0x0E],&reason_bytes,&othersub.identity.tag,&othersub.address) {
+							Err(why) => return Err(why),
+							Ok(_) => (),
+						};
+					}
+				}
 				continue;
 			}
 			for unacked_packet in sub.unacked_packets.iter() {
@@ -2328,21 +2315,6 @@ impl Server {
 		}
 		let send:bool = packet.payload.len() > 0;
 		let mut number_matched:u64 = 0;
-		for server_address in self.linked_servers.clone().keys() {
-			if &packet.source != server_address && [b'>'].contains(&&packet.parameter[0]) {
-				self.event_stream.push_back(Event::RoutedMessage {
-					destination:String::from_utf8_lossy(&packet.sender).to_string(),
-					address:packet.source.clone(),
-					parameter:packet.parameter.clone(),
-					payload:packet.payload.clone(),
-					timestamp:now_utc(),
-				});
-				match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&packet.crypt_tag,&server_address) {
-					Err(why) => return Err(why),
-					Ok(_) => (),
-				};
-			}
-		}
 		let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
 		for sub in self.subscribers.clone().values_mut() {
 			let mut subscriber_identifiers:String = String::new();
