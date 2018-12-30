@@ -635,9 +635,9 @@ fn main() {
 		term.console_info(&format!("Classes: #{}",teamech_client.identity.classes.join(", #")));
 		// initiate connection
 		term.console_info(&format!("Attempting to contact server at {}:{}...",server_address,remote_port));
-		match teamech_client.subscribe() {
+		match teamech_client.connect() {
 			Err(why) => {
-				term.console_error(&format!("Could not open subscription to server ({}). Resetting connection...",why));
+				term.console_error(&format!("Could not open connection to server ({}). Resetting connection...",why));
 				for _ in 0..20 {
 					sleep(Duration::new(0,100_000_000));
 					if let Some(Event::Key(Key::Ctrl('c'))) = term.get_event() {
@@ -745,7 +745,7 @@ fn main() {
 				match key_event {
 					Event::Key(Key::Ctrl('c'))|Event::Key(Key::Ctrl('d')) => { // quit
 						term.console_println(&format!("{}-*-{} Closing connection...",Fg(Cyan),Fg(Reset)));
-						match teamech_client.unsubscribe() {
+						match teamech_client.disconnect() {
 							Err(why) => {
 								term.console_println(&format!("{}-!- Warning:{} Failed to disconnect from server before quitting ({}).",Fg(Yellow),Fg(Reset),why));
 							},

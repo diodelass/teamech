@@ -180,7 +180,7 @@ fn main() {
 			Ok(_) => (),
 		};
 		if server.identities.len() == 0 {
-			eprintln!("Error: no readable identities found in {}. No client subscriptions can be opened!",&identity_dir.display());
+			eprintln!("Error: no readable identities found in {}. No client connections can be opened!",&identity_dir.display());
 		}
 		let mut error_count:u64 = 0;
 		let mut last_error:i64 = milliseconds_now();
