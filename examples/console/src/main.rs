@@ -622,10 +622,9 @@ fn main() {
 			},
 			Ok(client) => client,
 		};
-		// set asynchronous - very important for human-interacting clients such as this.
-		match teamech_client.set_asynchronous(1) {
+		match teamech_client.set_recv_wait(1000) {
 			Err(why) => {
-				term.console_error(&format!("teamech-console: could not set client to asynchronous (nonblocking) mode: {}",why));
+				term.console_error(&format!("teamech-console: could not set client read timeout: {}",why));
 				break 'recovery;
 			},
 			Ok(_) => (),
