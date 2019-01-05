@@ -43,11 +43,11 @@ II. Server
 		5. Handling acknowledgements						[X]
 			a. Resending													[X]
 			b. Relaying acks back to source				[X]
-	C. Server-Server Links										[-]
-		1. Opening															[-] 
-		2. Closing															[-]
+	C. Server-Server Links										[ ]
+		1. Opening															[ ] 
+		2. Closing															[ ]
 III. Client																	
-	A. Connecting														[X]
+	A. Connecting															[X]
 		1. Opening connection										[X]
 		2. Closing connection										[X]
 		3. Responding to closure								[X]
@@ -110,7 +110,6 @@ use std::fs::{File,read_dir,create_dir_all};
 use std::path::Path;
 use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
-use std::thread::sleep;
 use std::net::{UdpSocket,SocketAddr,IpAddr,Ipv4Addr};
 
 fn print_time(now:&Tm) -> String {
@@ -494,22 +493,6 @@ pub enum Event {
 		reason:String,
 		timestamp:Tm,
 	},
-	DeadEndMessage {
-		// we're a server and we've just received a message whose routing expression doesn't match any clients.
-		sender:String,
-		address:SocketAddr,
-		parameter:Vec<u8>,
-		payload:Vec<u8>,
-		timestamp:Tm,
-	},
-	HaltedMessage {
-		// we're a server and we've just received a packet that we've seen before, and won't resend.			
-		sender:String,
-		address:SocketAddr,
-		parameter:Vec<u8>,
-		payload:Vec<u8>,
-		timestamp:Tm,
-	},
 	TestMessage {
 		// we're a server and we've just received a packet that has a routing expression, but no payload.
 		// this means that it's a test packet that shouldn't actually be relayed.
@@ -681,14 +664,6 @@ impl Event {
 			},
 			Event::SendFailure {timestamp,destination,address,reason} => {
 				return format!("[{}] Could not send packet to {} [{}]: {}",&print_time(&timestamp),&destination,&address,&reason);
-			},
-			Event::DeadEndMessage {timestamp,sender,address,parameter,payload} => {
-				return format!("[{}] Not relayed (no matching recipients) {} [{}] -> [{}]: {}",&print_time(&timestamp),&sender,&address,
-					view_bytes(&parameter),view_bytes(&payload));
-			},
-			Event::HaltedMessage {timestamp,sender,address,parameter,payload} => {
-				return format!("[{}] (repeated packet) {} [{}] -> [{}]: {}",&print_time(&timestamp),&sender,&address,
-					view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::TestMessage {timestamp,sender,address,parameter,matches} => {
 				return format!("[{}] {} [{}] -> Match test: [{}] [matches {}]",&print_time(&timestamp),&sender,&address,
@@ -975,13 +950,6 @@ impl Client {
 							timestamp:now_utc(),
 						});
 						if self.recent_packets.contains(&received_packet.hash) {
-							self.event_stream.push_back(Event::HaltedMessage {
-								sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-								address:source_address.clone(),
-								parameter:received_packet.hash.clone(),
-								payload:received_packet.payload.clone(),
-								timestamp:now_utc(),
-							});
 							return Ok(());
 						}
 						if received_packet.valid && received_packet.parameter.len() > 0 {
@@ -1453,6 +1421,31 @@ pub fn load_identity_file(identity_path:&Path) -> Result<Identity,io::Error> {
 	});
 }
 
+// generates a packet for transmission, but does not transmit it.
+fn gen_packet(sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,
+crypt_tag:&Vec<u8>,identities:&HashMap<Vec<u8>,Identity>) -> Result<(Vec<u8>,Vec<u8>),io::Error> {
+	let mut message:Vec<u8> = Vec::new();
+	message.push(sender.len() as u8);
+	message.append(&mut sender.clone());
+	message.push(parameter.len() as u8);
+	message.append(&mut parameter.clone());
+	message.append(&mut payload.clone());
+	let bottle:Vec<u8>;
+	if let Some(identity) = identities.get(crypt_tag) {
+		bottle = match identity.encrypt(&message) {
+			Err(why) => return Err(why),
+			Ok(bytes) => bytes,
+		};
+	} else {
+		return Err(io::Error::new(io::ErrorKind::NotFound,"corresponding key not found"));
+	}
+	let mut packet_hash:Vec<u8> = vec![0;8];
+	let mut sha3 = Keccak::new_shake128();
+	sha3.update(&bottle);
+	sha3.finalize(&mut packet_hash);
+	return Ok((packet_hash,bottle));
+}
+
 impl Identity {
 
 	pub fn encrypt(&self,message:&Vec<u8>) -> Result<Vec<u8>,io::Error> {
@@ -1551,6 +1544,7 @@ pub struct ServerConnection {
 pub struct RemoteConnection {
 	pub name:String,
 	pub classes:Vec<String>,
+	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,
 }
 
 // server object for holding server parameters and connections.
@@ -1806,35 +1800,10 @@ impl Server {
 		};
 		return Ok(response_payload);
 	}
-	pub fn send_and_unack(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,crypt_tag:&Vec<u8>,address:&SocketAddr) -> Result<(),io::Error> {
-		match self.send_packet(&sender,&parameter,&payload,&crypt_tag,&address) {
-			Err(why) => return Err(why),
-			Ok(hash) => {
-				let unacked_packets = match self.server_connections.get_mut(&address) {
-					Some(connection) => &mut connection.unacked_packets,
-					None => match self.client_connections.get_mut(&address) {
-						Some(connection) => &mut connection.unacked_packets,
-						None => return Ok(()),
-					},
-				};
-				unacked_packets.insert(hash.clone(),UnackedPacket {
-					timestamp:milliseconds_now(),
-					tries:0,
-					source:self.address.clone(),
-					destination_hash:hash.clone(),
-					origin_hash:hash.clone(),
-					destination:address.clone(),
-					sender:sender.clone(),
-					recipient:b"client".to_vec(),
-					parameter:parameter.clone(),
-					payload:payload.clone(),
-				});
-				return Ok(());
-			},
-		};
-	}
+	
 	// encrypts and transmits a packet, much like the client version.
-	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,crypt_tag:&Vec<u8>,address:&SocketAddr) -> Result<Vec<u8>,io::Error> {
+	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,
+	crypt_tag:&Vec<u8>,address:&SocketAddr) -> Result<Vec<u8>,io::Error> {
 		let mut message:Vec<u8> = Vec::new();
 		message.push(sender.len() as u8);
 		message.append(&mut sender.clone());
@@ -2069,14 +2038,17 @@ impl Server {
 								let mut ack_sender:Vec<u8> = server_id.clone();
 								let mut ack_origin_hash:Vec<u8> = vec![0;8];
 								if let Some(mut con) = self.client_connections.get_mut(&source_address) {
-									match con.unacked_packets.remove(&acked_hash) {
-										None => (), 
-										Some(packet) => {
-											ack_origin = Some(packet.source.clone());
-											ack_sender = packet.recipient.clone();
-											ack_origin_hash = packet.origin_hash.clone();
-										},
+									if let Some(packet) =  con.unacked_packets.remove(&acked_hash) {
+										ack_origin = Some(packet.source.clone());
+										ack_sender = packet.recipient.clone();
+										ack_origin_hash = packet.origin_hash.clone();
 									};
+								}
+								if let Some(server) = self.server_connections.get_mut(&source_address) {
+									for remote_con in server.remote_connections.values_mut() {
+										if let Some(packet) = remote_con.unacked_packets.remote(&acked_hash) {
+										}
+									}
 								}
 								if let Some(origin) = ack_origin {
 									if origin != self.address {
@@ -2167,6 +2139,7 @@ impl Server {
 									let mut new_remote_connection:RemoteConnection = RemoteConnection {
 										name:String::new(),
 										classes:Vec::new(),
+										unacked_packets:HashMap::new(),
 									};
 									let payload_string:String = String::from_utf8_lossy(&received_packet.payload).to_string();
 									for payload_segment in payload_string.split("/") {
@@ -2202,7 +2175,8 @@ impl Server {
 								}
 								if new_information {
 									for server in self.server_connections.clone().values() {
-										match self.send_packet(&received_packet.sender,&received_packet.parameter,&received_packet.payload,&server.identity.tag,&server.address) {
+										match self.send_packet(&received_packet.sender,&received_packet.parameter,
+										&received_packet.payload,&server.identity.tag,&server.address) {
 											Err(why) => return Err(why),
 											Ok(_) => (),
 										};
@@ -2226,6 +2200,7 @@ impl Server {
 									let mut new_remote_connection:RemoteConnection = RemoteConnection {
 										name:String::new(),
 										classes:Vec::new(),
+										unacked_packets:HashMap::new(),
 									};
 									let payload_string:String = String::from_utf8_lossy(&received_packet.payload).to_string();
 									for payload_segment in payload_string.split("/") {
@@ -2277,7 +2252,8 @@ impl Server {
 								}
 								if new_information {
 									for server in self.server_connections.clone().values() {
-										match self.send_packet(&received_packet.sender,&received_packet.parameter,&received_packet.payload,&server.identity.tag,&server.address) {
+										match self.send_packet(&received_packet.sender,&received_packet.parameter,&received_packet.payload,
+										&server.identity.tag,&server.address) {
 											Err(why) => return Err(why),
 											Ok(_) => (),
 										};
@@ -2324,7 +2300,8 @@ impl Server {
 											'iterclasses:for class in con.identity.classes.iter() {
 												'resend:loop {
 													let payload_string:String = format!("@{}/#{} [{}]",&con.identity.name,&class,&con.address);
-													match self.send_packet(&server_id,&vec![0x04],&payload_string.as_bytes().to_vec(),&received_packet.crypt_tag,&source_address) {
+													match self.send_packet(&server_id,&vec![0x04],&payload_string.as_bytes().to_vec(),
+													&received_packet.crypt_tag,&source_address) {
 														Err(why) => return Err(why),
 														Ok(_) => (),
 													};
@@ -2497,105 +2474,99 @@ impl Server {
 	}
 
 	pub fn relay_packet(&mut self,packet:&Packet) -> Result<(),io::Error> {
+		let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
 		if !packet.valid {
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay invalid packet"));
 		}
 		if packet.parameter.len() < 1 {
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay packet with missing parameter"));
 		}
-		if self.recent_packets.contains(&packet.hash) {
-			self.event_stream.push_back(Event::HaltedMessage {
-				sender:String::from_utf8_lossy(&packet.sender).to_string(),
-				address:packet.source.clone(),
-				parameter:packet.parameter.clone(),
-				payload:packet.payload.clone(),
-				timestamp:now_utc(),
-			});
-			return Ok(());
-		}
-		let send:bool = packet.payload.len() > 0;
-		let mut number_matched:u64 = 0;
-		let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
-		for con in self.client_connections.clone().values_mut() {
-			let mut connector_identifiers:String = String::new();
-			connector_identifiers.push_str(&format!("@{} ",&con.identity.name));
-			for class in con.identity.classes.iter() {
-				connector_identifiers.push_str(&format!("#{} ",&class));
+		let identities = self.identities.clone();
+		let mut dest_addresses:HashSet<SocketAddr> = HashSet::new();
+		let mut outbound_packets:Vec<(Vec<u8>,Vec<u8>,SocketAddr)> = Vec::new();
+		let mut match_count:u64 = 0;
+		for server in self.server_connections.values_mut() {
+			if server.address == packet.source {
+				continue;
 			}
-			let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&connector_identifiers);
-			if packet.source != con.address && [b'>'].contains(&&packet.parameter[0])
-				&& (matched || con.identity.classes.contains(&"supervisor".to_owned())) {
-				if send {
-					let recipient:String = format!("@{}/#{}",&con.identity.name,&con.identity.classes[0]);
-					self.event_stream.push_back(Event::RoutedMessage {
-						destination:recipient.clone(),
-						address:con.address.clone(),
-						parameter:packet.parameter.clone(),
-						payload:packet.payload.clone(),
-						timestamp:now_utc(),
-					});
-					let unack_source:SocketAddr;
+			for remote_con in server.remote_connections.values_mut() {
+				let mut con_identifiers:String = String::new();
+				con_identifiers.push_str(&format!("@{} ",remote_con.name));
+				for class in remote_con.classes.iter() {
+					con_identifiers.push_str(&format!("#{} ",class));
+				}
+				let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&con_identifiers);
+				if matched || remote_con.classes.contains(&String::from("supervisor")) {
+					if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&server.identity.tag,&identities) {
+						let recipient_string:String;
+						if remote_con.classes.len() > 0 {
+							recipient_string = format!("@{}/#{}",remote_con.name,remote_con.classes[0]);
+						} else {
+							recipient_string = format!("@{}",remote_con.name);
+						}
+						remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
+							timestamp:packet.timestamp.clone(),
+							tries:0,
+							source:packet.source.clone(),
+							destination_hash:hash.clone(),
+							origin_hash:packet.hash.clone(),
+							destination:server.address.clone(),
+							sender:packet.sender.clone(),
+							recipient:recipient_string.as_bytes().to_vec(),
+							parameter:packet.parameter.clone(),
+							payload:packet.payload.clone(),
+						});
+						if !dest_addresses.contains(&server.address) {
+							outbound_packets.push((hash,bottle,server.address.clone()));
+							dest_addresses.insert(server.address.clone());
+						}
+					}
 					if matched {
-						unack_source = packet.source.clone();
-					} else {
-						unack_source = self.address.clone();
+						match_count += 1;
 					}
-					match self.send_packet(&packet.sender,&packet.parameter,&packet.payload,&con.identity.tag,&con.address) {
-						Err(why) => return Err(why),
-						Ok(hash) => {
-							if let Some(list_con) = self.client_connections.get_mut(&con.address) {
-								list_con.unacked_packets.insert(hash.clone(),UnackedPacket {
-									timestamp:milliseconds_now(),
-									tries:0,
-									source:unack_source,
-									destination_hash:hash.clone(),
-									origin_hash:packet.hash.clone(),
-									destination:con.address.clone(),
-									sender:packet.sender.clone(),
-									recipient:recipient.as_bytes().to_vec(),
-									parameter:packet.parameter.clone(),
-									payload:packet.payload.clone(),
-								});
-							}
-						},
-					};
-					self.recent_packets.push_back(packet.hash.clone());
-					while self.recent_packets.len() > self.max_recent_packets {
-						let _ = self.recent_packets.pop_front();
-					}
-				}	
-				if matched {
-					number_matched += 1;
 				}
 			}
 		}
-		if !send {
-			self.event_stream.push_back(Event::TestMessage {
-				sender:String::from_utf8_lossy(&packet.sender).to_string(),
-				address:packet.source.clone(),
-				parameter:packet.parameter.clone(),
-				matches:number_matched,
-				timestamp:now_utc(),
-			});
-		} else if number_matched == 0 {
-			self.event_stream.push_back(Event::DeadEndMessage {
-				sender:String::from_utf8_lossy(&packet.sender).to_string(),
-				address:packet.source.clone(),
-				parameter:packet.parameter.clone(),
-				payload:packet.payload.clone(),
-				timestamp:now_utc(),
-			});
-		} 
+		for client in self.client_connections.values_mut() {
+			if client.address == packet.source {
+				continue;
+			}
+			let mut con_identifiers:String = String::new();
+			con_identifiers.push_str(&format!("@{} ",client.identity.name));
+			for class in client.identity.classes.iter() {
+				con_identifiers.push_str(&format!("#{} ",class));
+			}
+			let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&con_identifiers);
+			if matched || client.identity.classes.contains(&String::from("supervisor")) {
+				if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&client.identity.tag,&identities) {
+					client.unacked_packets.insert(hash.clone(),UnackedPacket {
+						timestamp:packet.timestamp.clone(),
+						tries:0,
+						source:packet.source.clone(),
+						destination_hash:hash.clone(),
+						origin_hash:packet.hash.clone(),
+						destination:client.address.clone(),
+						sender:packet.sender.clone(),
+						recipient:format!("@{}/#{}",client.identity.name,client.identity.classes[0]).as_bytes().to_vec(),
+						parameter:packet.parameter.clone(),
+						payload:packet.payload.clone(),
+					});
+					outbound_packets.push((hash,bottle,client.address.clone()));
+					if matched {
+						match_count += 1;
+					}
+				}
+			}
+		}
 		let mut ack_payload:Vec<u8> = Vec::new();
 		ack_payload.append(&mut packet.hash.clone());
-		ack_payload.append(&mut u64_to_bytes(&number_matched).to_vec());
-		if send {
+		ack_payload.append(&mut u64_to_bytes(&match_count).to_vec());
+		if match_count > 0 {
 			match self.send_packet(&server_id,&vec![0x06],&ack_payload,&packet.crypt_tag,&packet.source) {
 				Err(why) => return Err(why),
 				Ok(_) => (),
 			};
 		} else {
-			sleep(Duration::new(self.ack_fake_lag_ms/1000,(self.ack_fake_lag_ms as u32)%1000));
 			match self.send_packet(&server_id,&vec![0x03],&ack_payload,&packet.crypt_tag,&packet.source) {
 				Err(why) => return Err(why),
 				Ok(_) => (),
