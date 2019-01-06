@@ -168,9 +168,8 @@ fn main() {
 			},
 			Ok(server) => server,
 		};
-		// set this server to asynchronous mode, with an idle rep rate of 10 Hz
-		match server.set_asynchronous(1) {
-			Err(why) => eprintln!("Warning: Failed to set server to asynchronous mode: {}",why),
+		match server.set_recv_wait(1000) {
+			Err(why) => eprintln!("Warning: Failed to set server receive timeout: {}",why),
 			Ok(_) => (),
 		};
 		match server.load_identities(&identity_dir) {

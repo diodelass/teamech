@@ -620,7 +620,7 @@ impl Event {
 				return format!("[{}] Connection opened by {} [{}]",&print_time(&timestamp),&sender,&address);
 			},
 			Event::ServerConnectFailure {timestamp,sender,address,reason} => {
-				return format!("[{}] Failed to accept connection request from {} [{}]: {}",&print_time(&timestamp),&sender,&address,&reason);
+				return format!("[{}] Rejected connection request from {} [{}]: {}",&print_time(&timestamp),&sender,&address,&reason);
 			},
 			Event::ServerDisconnect {timestamp,sender,address,reason} => {
 				return format!("[{}] Connection closed for {} [{}] ({})",&print_time(&timestamp),&sender,&address,&reason);
@@ -770,7 +770,6 @@ pub struct Client {
 	pub recent_packets:VecDeque<Vec<u8>>,								// hashes of packets that were recently seen, to merge double-sends
 	pub max_recent_packets:usize,												// max number of recent packet hashes to store
 	pub max_resend_tries:u64,														// maximum number of tries to resend a packet before discarding it
-	pub uptime:i64,																			// time at which this client was created
 	pub time_tolerance_ms:i64,													// maximum time difference a packet can have from now
 }
 
@@ -802,7 +801,6 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 				max_recent_packets:32,
 				max_resend_tries:3,
 				identity:new_identity,
-				uptime:milliseconds_now(),
 				time_tolerance_ms:3000,
 			};
 			match created_client.set_recv_wait(1000) {
@@ -911,10 +909,8 @@ impl Client {
 		};
 	}
 
-	// collect packets from the server and append them to our receive_queue. this function
-	// will block indefinitely if the client is in synchronous mode (the default), or give
-	// up after a set delay if it has been set to asynchronous mode. in asynchronous mode,
-	// the WouldBlock errors resulting from no new packets being available are suppressed,
+	// Collect packets from the server and append them to our receive_queue.
+	// The WouldBlock errors resulting from no new packets being available are suppressed,
 	// so they do not need to be handled in the implementation code.
 	pub fn process_packets(&mut self) -> Result<(),io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
@@ -951,6 +947,11 @@ impl Client {
 						});
 						if self.recent_packets.contains(&received_packet.hash) {
 							return Ok(());
+						} else {
+							self.recent_packets.push_back(received_packet.hash.clone());
+							while self.recent_packets.len() > self.max_recent_packets {
+								self.recent_packets.pop_front();
+							}
 						}
 						if received_packet.valid && received_packet.parameter.len() > 0 {
 							match (received_packet.parameter[0],received_packet.payload.len()) {
@@ -1526,7 +1527,6 @@ impl Identity {
 pub struct ClientConnection {
 	pub address:SocketAddr,																	// socket address of client
 	pub identity:Identity,																	// identity object corresponding to this connection
-	pub uptime:i64,																					// time at which this connection was created
 	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,			// packets that need to be resent if they aren't acknowledged
 	pub delivery_failures:u64,															// number of times a packet delivery has failed
 }
@@ -1536,7 +1536,6 @@ pub struct ServerConnection {
 	pub address:SocketAddr,																		// socket address of other server
 	pub identity:Identity,																		// this server's identity object
 	pub remote_connections:HashMap<String,RemoteConnection>,	// client connections which can be accessed through this server
-	pub uptime:i64,																						// time at which this connection was created
 	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,				// packets that need to be resent if they aren't acknowledged
 }
 
@@ -1549,27 +1548,25 @@ pub struct RemoteConnection {
 
 // server object for holding server parameters and connections.
 pub struct Server {
+	socket:UdpSocket,
+	identities_in_use:HashSet<Vec<u8>>,
+	names_in_use:HashSet<String>,
+	recent_packets:VecDeque<Vec<u8>>,
 	pub name:String,
 	pub address:SocketAddr,
-	pub socket:UdpSocket,
 	pub identities:HashMap<Vec<u8>,Identity>,
-	pub identities_in_use:HashSet<Vec<u8>>,
 	pub client_connections:HashMap<SocketAddr,ClientConnection>,
 	pub server_connections:HashMap<SocketAddr,ServerConnection>,
 	pub max_connections:usize,
 	pub ban_points:HashMap<IpAddr,u64>,
 	pub max_ban_points:u64,
 	pub banned_addresses:HashSet<IpAddr>,
-	pub recent_packets:VecDeque<Vec<u8>>,
 	pub max_recent_packets:usize,
 	pub max_unsent_packets:usize,
 	pub max_resend_tries:u64,
 	pub max_resend_failures:u64,
 	pub event_stream:VecDeque<Event>,
-	pub uptime:i64,
-	pub synchronous:bool,
 	pub time_tolerance_ms:i64,
-	pub ack_fake_lag_ms:u64,
 }
 
 // server constructor, works very similarly to client constructor
@@ -1586,6 +1583,7 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				server_connections:HashMap::new(),
 				identities:HashMap::new(),
 				identities_in_use:HashSet::new(),
+				names_in_use:HashSet::new(),
 				max_connections:1024,
 				ban_points:HashMap::new(),
 				max_ban_points:10,
@@ -1596,10 +1594,11 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				max_unsent_packets:32,
 				max_resend_tries:3,
 				max_resend_failures:1,
-				uptime:milliseconds_now(),
-				synchronous:true,
 				time_tolerance_ms:3000,
-				ack_fake_lag_ms:0,
+			};
+			match created_server.set_recv_wait(1000) {
+				Err(why) => return Err(why),
+				Ok(_) => (),
 			};
 			created_server.event_stream.push_back(Event::ServerCreate {
 				address:addr,
@@ -1717,32 +1716,10 @@ impl Server {
 		}
 	}
 
-	// similar to client sync/async settings. synchronous (the default) means the server
-	// will remain completely idle when there are no packets to process. this makes for 
-	// a lighter overall load on low-power systems, but also prevents the server from
-	// doing anything when there are no incoming packets.
-	pub fn set_synchronous(&mut self) -> Result<(),io::Error> {
-		match self.socket.set_read_timeout(None) {
+	pub fn set_recv_wait(&mut self,wait_time_us:u64) -> Result<(),io::Error> {
+		match self.socket.set_read_timeout(Some(Duration::new(wait_time_us/1000000,((wait_time_us%1000000)*1000) as u32))) {
 			Err(why) => return Err(why),
-			Ok(_) => {
-				self.synchronous = true;
-				return Ok(());
-			},
-		};
-	}
-
-	// similar to client sync/async settings. asynchronous means the server will poll for
-	// incoming packets, wait a specified interval, and then take a break to do other things
-	// before coming back to look again. when no packets are incoming, the server will perform
-	// other tasks once every timeout period.
-	// setting the timeout very low may result in high idle load.
-	pub fn set_asynchronous(&mut self,wait_time_ms:u64) -> Result<(),io::Error> {
-		match self.socket.set_read_timeout(Some(Duration::new(wait_time_ms/1000,(wait_time_ms%1000) as u32))) {
-			Err(why) => return Err(why),
-			Ok(_) => {
-				self.synchronous = false;
-				return Ok(());
-			},
+			Ok(_) => return Ok(()),
 		}
 	}
 
@@ -1900,6 +1877,10 @@ impl Server {
 					if self.banned_addresses.contains(&source_address.ip()) {
 						continue;
 					}
+					let mut packet_hash:Vec<u8> = vec![0;8];
+					let mut sha3 = Keccak::new_shake128();
+					sha3.update(&input_buffer[..receive_length]);
+					sha3.finalize(&mut packet_hash);
 					let mut current_ban_points:u64 = 0;
 					if let Some(points) = self.ban_points.get(&source_address.ip()) {
 						current_ban_points = points.clone()
@@ -1910,6 +1891,14 @@ impl Server {
 					if current_ban_points > self.max_ban_points { 
 						self.banned_addresses.insert(source_address.ip());
 						continue;
+					}
+					if self.recent_packets.contains(&packet_hash) {
+						continue;
+					} else {
+						self.recent_packets.push_back(packet_hash.clone());
+						while self.recent_packets.len() > self.max_recent_packets {
+							self.recent_packets.pop_front();
+						}
 					}
 					let mut sender:String = String::new();
 					if let Some(con) = self.client_connections.get_mut(&source_address) {
@@ -1938,10 +1927,6 @@ impl Server {
 							address:source_address.clone(),
 							timestamp:now_utc(),
 						});
-						let mut packet_hash:Vec<u8> = vec![0;8];
-						let mut sha3 = Keccak::new_shake128();
-						sha3.update(&input_buffer[..receive_length]);
-						sha3.finalize(&mut packet_hash);
 						match self.send_packet(&server_id,&vec![0x15],&packet_hash,&vec![0;8],&source_address) {
 							Err(why) => return Err(why),
 							Ok(_) => (),
@@ -1960,11 +1945,12 @@ impl Server {
 					if !self.client_connections.contains_key(&source_address) {
 					// && received_packet.payload.len() >= 8 { 
 					// && received_packet.parameter == vec![0x02] {
-						if received_packet.valid && self.client_connections.len() < self.max_connections {
+						if received_packet.valid && self.client_connections.len() < self.max_connections 
+						&& !self.identities_in_use.contains(&sender_identity.tag) 
+						&& !self.names_in_use.contains(&sender_identity.name) {
 							self.client_connections.insert(source_address.clone(),ClientConnection {
 								address:source_address.clone(),
 								identity:sender_identity.clone(),
-								uptime:milliseconds_now(),
 								unacked_packets:HashMap::new(),
 								delivery_failures:0,
 							});	
@@ -1978,6 +1964,7 @@ impl Server {
 								}
 							}
 							self.identities_in_use.insert(sender_identity.tag.clone());
+							self.names_in_use.insert(sender_identity.name.clone());
 							match self.send_packet(&server_id,&vec![0x02],&vec![],&received_packet.crypt_tag,&source_address) {
 								Err(why) => return Err(why),
 								Ok(_) => (),
@@ -2010,6 +1997,10 @@ impl Server {
 								}
 							} else if self.client_connections.len() >= self.max_connections {
 								reject_reason = "server full";
+							} else if self.identities_in_use.contains(&sender_identity.tag) {
+								reject_reason = "identity already in use";
+							} else if self.names_in_use.contains(&sender_identity.name) {
+								reject_reason = "name already in use";
 							}
 							let sender_id:String = String::from_utf8_lossy(&received_packet.sender).to_string();
 							self.event_stream.push_back(Event::ServerConnectFailure {
@@ -2038,15 +2029,19 @@ impl Server {
 								let mut ack_sender:Vec<u8> = server_id.clone();
 								let mut ack_origin_hash:Vec<u8> = vec![0;8];
 								if let Some(mut con) = self.client_connections.get_mut(&source_address) {
-									if let Some(packet) =  con.unacked_packets.remove(&acked_hash) {
+									if let Some(packet) = con.unacked_packets.remove(&acked_hash) {
 										ack_origin = Some(packet.source.clone());
 										ack_sender = packet.recipient.clone();
 										ack_origin_hash = packet.origin_hash.clone();
 									};
-								}
-								if let Some(server) = self.server_connections.get_mut(&source_address) {
-									for remote_con in server.remote_connections.values_mut() {
-										if let Some(packet) = remote_con.unacked_packets.remote(&acked_hash) {
+								} else if let Some(server) = self.server_connections.get_mut(&source_address) {
+									let client_id:String = String::from_utf8_lossy(&received_packet.sender).to_string();
+									let client_name:String = client_id.trim_matches('@').splitn(2,"/").collect::<Vec<&str>>()[0].to_owned();
+									if let Some(remote_con) = server.remote_connections.get_mut(&client_name) {
+										if let Some(packet) = remote_con.unacked_packets.remove(&acked_hash) {
+											ack_origin = Some(packet.source.clone());
+											ack_sender = packet.recipient.clone();
+											ack_origin_hash = packet.origin_hash.clone();
 										}
 									}
 								}
@@ -2107,7 +2102,6 @@ impl Server {
 											address:server.address.clone(),
 											identity:server.identity.clone(),
 											remote_connections:HashMap::new(),
-											uptime:server.uptime,
 											unacked_packets:server.unacked_packets.clone(),
 										});
 										match self.send_packet(&server_id,&vec![0x06],&received_packet.hash,&received_packet.crypt_tag,&source_address) {
@@ -2262,7 +2256,8 @@ impl Server {
 							},
 							(0x18,0) => {
 								if let Some(cancelled_con) = self.client_connections.remove(&source_address) {
-									let _ = self.identities_in_use.remove(&cancelled_con.identity.tag);
+									self.identities_in_use.remove(&cancelled_con.identity.tag);
+									self.names_in_use.remove(&cancelled_con.identity.name);
 								}
 								match self.send_packet(&server_id,&vec![0x19],&vec![],&received_packet.crypt_tag,&source_address) {
 									Err(why) => return Err(why),
@@ -2365,9 +2360,6 @@ impl Server {
 					} // if message.len > 0
 				}, // recvfrom ok
 			}; // match recvfrom
-			if self.synchronous {
-				break;
-			}
 		}
 		return Ok(());
 	}
@@ -2381,7 +2373,8 @@ impl Server {
 					list_con.unacked_packets.clear();
 				}
 				if let Some(cancelled_con) = self.client_connections.remove(&con.address) {
-					let _ = self.identities_in_use.remove(&cancelled_con.identity.tag);
+					self.identities_in_use.remove(&cancelled_con.identity.tag);
+					self.names_in_use.remove(&cancelled_con.identity.name);
 				}
 				match self.send_packet(&vec![],&vec![0x19],&vec![],&con.identity.tag,&con.address) {
 					Err(why) => return Err(why),
@@ -2408,7 +2401,8 @@ impl Server {
 			}
 			if con.delivery_failures > self.max_resend_failures {
 				if let Some(cancelled_con) = self.client_connections.remove(&con.address) {
-					let _ = self.identities_in_use.remove(&cancelled_con.identity.tag);
+					self.identities_in_use.remove(&cancelled_con.identity.tag);
+					self.names_in_use.remove(&cancelled_con.identity.name);
 				}
 				match self.send_packet(&vec![],&vec![0x19],&vec![],&con.identity.tag,&con.address) {
 					Err(why) => return Err(why),
@@ -2431,21 +2425,35 @@ impl Server {
 						};
 					}
 				}
+				let now = milliseconds_now();
+				for server in self.server_connections.values_mut() {
+					for remote_con in server.remote_connections.values_mut() {
+						for unacked in remote_con.unacked_packets.clone().iter() {
+							if unacked.1.timestamp+self.time_tolerance_ms < now {
+								remote_con.unacked_packets.remove(unacked.0);
+							}
+						}
+					}
+				}
 				continue;
 			}
-			for unacked_packet in con.unacked_packets.values() {
+			for unacked_packet in con.unacked_packets.clone().values() {
 				// if the packet's timestamp is a while ago, resend it.
 				if unacked_packet.timestamp+self.time_tolerance_ms < now {
-					match self.send_packet(&unacked_packet.sender,&unacked_packet.parameter,&unacked_packet.payload,&con.identity.tag,&con.address) {
+					let resend_hash:Vec<u8> = match self.send_packet(&unacked_packet.sender,&unacked_packet.parameter,
+					&unacked_packet.payload,&con.identity.tag,&con.address) {
 						Err(why) => return Err(why),
-						Ok(_) => (),
+						Ok(hash) => hash,
 					};
 					// after resending a packet, update its timestamp in the original connector list.
 					if let Some(list_con) = self.client_connections.get_mut(&con.address) {
 						if unacked_packet.tries < self.max_resend_tries {
-							if let Some(list_packet) = list_con.unacked_packets.get_mut(&unacked_packet.destination_hash) {
-								list_packet.tries += 1;
-								list_packet.timestamp = milliseconds_now();
+							let mut new_tries:u64 = 0;
+							if let Some(list_packet) = list_con.unacked_packets.remove(&unacked_packet.destination_hash) {
+								new_tries = list_packet.tries;
+							}
+							if let Some(new_unack) = list_con.unacked_packets.get_mut(&resend_hash) {
+								new_unack.tries = new_tries+1;
 							}
 							self.event_stream.push_back(Event::DeliveryRetry {
 								destination:String::from_utf8_lossy(&unacked_packet.recipient).to_string(),
@@ -2485,6 +2493,7 @@ impl Server {
 		let mut dest_addresses:HashSet<SocketAddr> = HashSet::new();
 		let mut outbound_packets:Vec<(Vec<u8>,Vec<u8>,SocketAddr)> = Vec::new();
 		let mut match_count:u64 = 0;
+		let send:bool = packet.payload.len() > 0;
 		for server in self.server_connections.values_mut() {
 			if server.address == packet.source {
 				continue;
@@ -2498,27 +2507,29 @@ impl Server {
 				let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&con_identifiers);
 				if matched || remote_con.classes.contains(&String::from("supervisor")) {
 					if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&server.identity.tag,&identities) {
-						let recipient_string:String;
-						if remote_con.classes.len() > 0 {
-							recipient_string = format!("@{}/#{}",remote_con.name,remote_con.classes[0]);
-						} else {
-							recipient_string = format!("@{}",remote_con.name);
-						}
-						remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
-							timestamp:packet.timestamp.clone(),
-							tries:0,
-							source:packet.source.clone(),
-							destination_hash:hash.clone(),
-							origin_hash:packet.hash.clone(),
-							destination:server.address.clone(),
-							sender:packet.sender.clone(),
-							recipient:recipient_string.as_bytes().to_vec(),
-							parameter:packet.parameter.clone(),
-							payload:packet.payload.clone(),
-						});
-						if !dest_addresses.contains(&server.address) {
-							outbound_packets.push((hash,bottle,server.address.clone()));
-							dest_addresses.insert(server.address.clone());
+						if send {
+							let recipient_string:String;
+							if remote_con.classes.len() > 0 {
+								recipient_string = format!("@{}/#{}",remote_con.name,remote_con.classes[0]);
+							} else {
+								recipient_string = format!("@{}",remote_con.name);
+							}
+							remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
+								timestamp:packet.timestamp.clone(),
+								tries:0,
+								source:packet.source.clone(),
+								destination_hash:hash.clone(),
+								origin_hash:packet.hash.clone(),
+								destination:server.address.clone(),
+								sender:packet.sender.clone(),
+								recipient:recipient_string.as_bytes().to_vec(),
+								parameter:packet.parameter.clone(),
+								payload:packet.payload.clone(),
+							});
+							if !dest_addresses.contains(&server.address) {
+								outbound_packets.push((hash,bottle,server.address.clone()));
+								dest_addresses.insert(server.address.clone());
+							}
 						}
 					}
 					if matched {
@@ -2539,21 +2550,27 @@ impl Server {
 			let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&con_identifiers);
 			if matched || client.identity.classes.contains(&String::from("supervisor")) {
 				if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&client.identity.tag,&identities) {
-					client.unacked_packets.insert(hash.clone(),UnackedPacket {
-						timestamp:packet.timestamp.clone(),
-						tries:0,
-						source:packet.source.clone(),
-						destination_hash:hash.clone(),
-						origin_hash:packet.hash.clone(),
-						destination:client.address.clone(),
-						sender:packet.sender.clone(),
-						recipient:format!("@{}/#{}",client.identity.name,client.identity.classes[0]).as_bytes().to_vec(),
-						parameter:packet.parameter.clone(),
-						payload:packet.payload.clone(),
-					});
-					outbound_packets.push((hash,bottle,client.address.clone()));
-					if matched {
-						match_count += 1;
+					if send {
+						let source;
+						if matched {
+							source = packet.source.clone();
+							match_count += 1;
+						} else {
+							source = self.address.clone();
+						}
+						client.unacked_packets.insert(hash.clone(),UnackedPacket {
+							timestamp:packet.timestamp.clone(),
+							tries:0,
+							source:source,
+							destination_hash:hash.clone(),
+							origin_hash:packet.hash.clone(),
+							destination:client.address.clone(),
+							sender:packet.sender.clone(),
+							recipient:format!("@{}/#{}",client.identity.name,client.identity.classes[0]).as_bytes().to_vec(),
+							parameter:packet.parameter.clone(),
+							payload:packet.payload.clone(),
+						});
+						outbound_packets.push((hash,bottle,client.address.clone()));
 					}
 				}
 			}
@@ -2561,7 +2578,13 @@ impl Server {
 		let mut ack_payload:Vec<u8> = Vec::new();
 		ack_payload.append(&mut packet.hash.clone());
 		ack_payload.append(&mut u64_to_bytes(&match_count).to_vec());
-		if match_count > 0 {
+		if send {
+			for outbound_packet in outbound_packets.iter() {
+				match self.send_raw(&outbound_packet.1,&outbound_packet.2) {
+					Err(why) => return Err(why),
+					Ok(_) => (),
+				};
+			}
 			match self.send_packet(&server_id,&vec![0x06],&ack_payload,&packet.crypt_tag,&packet.source) {
 				Err(why) => return Err(why),
 				Ok(_) => (),
