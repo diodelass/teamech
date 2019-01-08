@@ -440,7 +440,31 @@ pub enum Event {
 		timestamp:Tm,
 	},
 	ClientDisconnectFailure {
-		// we're a client, and something went wrong while unconscribing.
+		// we're a client, and something went wrong while disconnecting.
+		address:SocketAddr,
+		reason:String,
+		timestamp:Tm,
+	},
+	ServerLinkSend {
+		// we're a server, and we're attempting to connect to another server.
+		address:SocketAddr,
+		timestamp:Tm,
+	},
+	ServerLinkReceive {
+		// we're a server, and another server has connected to us.
+		sender:String,
+		address:SocketAddr,
+		timestamp:Tm,
+	},
+	ServerUnlinkSend {
+		// we're a server, and we're terminating a link to another server.
+		address:SocketAddr,
+		reason:String,
+		timestamp:Tm,
+	},
+	ServerUnlinkReceive {
+		// we're a server, and we've received a termination notice for this connection.
+		sender:String,
 		address:SocketAddr,
 		reason:String,
 		timestamp:Tm,
@@ -643,6 +667,18 @@ impl Event {
 			Event::RemoteDisconnect {timestamp,sender,server} => {
 				return format!("[{}] Remote client {} has disconnected from server {}",&print_time(&timestamp),&sender,&server);
 			}
+			Event::ServerLinkSend {timestamp,address} => {
+				return format!("[{}] {} <- Establishing server-to-server link",&print_time(&timestamp),&address);
+			},
+			Event::ServerLinkReceive {timestamp,sender,address} => {
+				return format!("[{}] {} [{}] -> Received establishment of server-to-server link",&print_time(&timestamp),&sender,&address);
+			},
+			Event::ServerUnlinkSend {timestamp,reason,address} => {
+				return format!("[{}] {} <- Closing server-to-server link ({})",&print_time(&timestamp),&address,&reason);
+			},
+			Event::ServerUnlinkReceive {timestamp,sender,reason,address} => {
+				return format!("[{}] {} [{}] -> Received closure of server-to-server link ({})",&print_time(&timestamp),&sender,&address,&reason);
+			},
 			Event::ReceivePacket {timestamp,sender,address,parameter,payload,hash} => {
 				return format!("[{}] recv({} [{}]): [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
 					view_bytes(&parameter),view_bytes(&payload));
@@ -1552,8 +1588,10 @@ pub struct Server {
 	identities_in_use:HashSet<Vec<u8>>,
 	names_in_use:HashSet<String>,
 	recent_packets:VecDeque<Vec<u8>>,
+	connecting_servers:HashSet<SocketAddr>,
 	pub name:String,
 	pub address:SocketAddr,
+	pub identity:Identity,
 	pub identities:HashMap<Vec<u8>,Identity>,
 	pub client_connections:HashMap<SocketAddr,ClientConnection>,
 	pub server_connections:HashMap<SocketAddr,ServerConnection>,
@@ -1570,17 +1608,40 @@ pub struct Server {
 }
 
 // server constructor, works very similarly to client constructor
-pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
+pub fn new_server(identity_file:&Path,port:&u16) -> Result<Server,io::Error> {
 	match UdpSocket::bind(&format!("[::]:{}",port)) {
 		Err(why) => return Err(why),
 		Ok(socket) => {
 			let addr = socket.local_addr().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)),0));
+			let mut server_events:VecDeque<Event> = VecDeque::new();
+			server_events.push_back(Event::ServerCreate {
+				address:addr,
+				timestamp:now_utc(),
+			});
+			let server_identity = match load_identity_file(identity_file) {
+				Err(why) => {
+					server_events.push_back(Event::IdentityLoadFailure {
+						filename:format!("{}",identity_file.display()),
+						reason:format!("{}",why),
+						timestamp:now_utc(),
+					});
+					Identity {
+						tag:vec![0;8],
+						key:vec![0;32],
+						name:String::from("server"),
+						classes:vec![String::from("server")],
+					}
+				},
+				Ok(id) => id,
+			};
 			let mut created_server = Server {
-				name:name.to_owned(),
+				name:server_identity.name.to_owned(),
 				address:addr.clone(),
 				socket:socket,
 				client_connections:HashMap::new(),
 				server_connections:HashMap::new(),
+				connecting_servers:HashSet::new(),
+				identity:server_identity.clone(),
 				identities:HashMap::new(),
 				identities_in_use:HashSet::new(),
 				names_in_use:HashSet::new(),
@@ -1600,10 +1661,6 @@ pub fn new_server(name:&str,port:&u16) -> Result<Server,io::Error> {
 				Err(why) => return Err(why),
 				Ok(_) => (),
 			};
-			created_server.event_stream.push_back(Event::ServerCreate {
-				address:addr,
-				timestamp:now_utc(),
-			});
 			return Ok(created_server);
 		},
 	};
@@ -1778,6 +1835,65 @@ impl Server {
 		return Ok(response_payload);
 	}
 	
+	// Open a connection to a remote server which has our identity on file and whose identity we have on file.
+	pub fn link_server(&mut self,remote_address:SocketAddr) -> Result<(),io::Error> {
+		let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
+		let server_address:SocketAddr = self.address.clone();
+		let server_tag:Vec<u8> = self.identity.tag.clone();
+		match self.send_packet(&server_id,&vec![0x11],&vec![],&server_tag,&remote_address) {
+			Err(why) => return Err(why),
+			Ok(hash) => {
+				remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
+					timestamp:milliseconds_now(),
+					tries:0,
+					source:server_address,
+					destination_hash:hash.clone(),
+					origin_hash:hash.clone(),
+					destination:remote_address.clone(),
+					sender:server_id.clone(),
+					recipient:Vec::new(),
+					parameter:vec![0x11],
+					payload:Vec::new(),
+				});
+			},
+		};
+		self.event_stream.push_back(Event::ServerLinkSend {
+			address:remote_address.clone(),
+			timestamp:now_utc(),
+		});
+		return Ok(());
+	}
+
+	pub fn unlink_server(&mut self,remote_address:SocketAddr) -> Result<(),io::Error> {
+		let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
+		let server_address:SocketAddr = self.address.clone();
+		let server_tag:Vec<u8> = self.identity.tag.clone();
+		match self.send_packet(&server_id,&vec![0x18],&vec![],&server_tag,&remote_address) {
+			Err(why) => return Err(why),
+			Ok(hash) => {
+				remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
+					timestamp:milliseconds_now(),
+					tries:0,
+					source:server_address,
+					destination_hash:hash.clone(),
+					origin_hash:hash.clone(),
+					destination:remote_address.clone(),
+					sender:server_id.clone(),
+					recipient:Vec::new(),
+					parameter:vec![0x18],
+					payload:Vec::new(),
+				});
+			},
+		};
+		self.server_connections.remove(&remote_address);
+		self.event_stream.push_back(Event::ServerUnlinkSend {
+			address:remote_address.clone(),
+			reason:String::from("link terminated locally"),
+			timestamp:now_utc(),
+		});
+		return Ok(());
+	}
+
 	// encrypts and transmits a packet, much like the client version.
 	pub fn send_packet(&mut self,sender:&Vec<u8>,parameter:&Vec<u8>,payload:&Vec<u8>,
 	crypt_tag:&Vec<u8>,address:&SocketAddr) -> Result<Vec<u8>,io::Error> {
@@ -1919,6 +2035,8 @@ impl Server {
 					let packet_crypt_tag:Vec<u8> = input_buffer[receive_length-8..receive_length].to_vec();
 					let sender_identity:Identity;
 					let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
+					let server_address:SocketAddr = self.address.clone();
+					let server_tag:Vec<u8> = self.identity.tag.clone();
 					if let Some(id) = self.identities.clone().get(&packet_crypt_tag) {
 						sender_identity = id.clone();
 					} else {
@@ -2097,17 +2215,46 @@ impl Server {
 							},
 							(0x11,_) => {
 								if let Some(server) = self.client_connections.remove(&source_address) {
-									if server.identity.classes.contains(&String::from("server")) {
+									if server.identity.classes.contains(&String::from("server")) && received_packet.crypt_tag != vec![0;8] {
 										self.server_connections.insert(source_address.clone(),ServerConnection {
 											address:server.address.clone(),
 											identity:server.identity.clone(),
 											remote_connections:HashMap::new(),
 											unacked_packets:server.unacked_packets.clone(),
 										});
-										match self.send_packet(&server_id,&vec![0x06],&received_packet.hash,&received_packet.crypt_tag,&source_address) {
-											Err(why) => return Err(why),
-											Ok(_) => (),
-										};
+										self.event_stream.push_back(Event::ServerLinkReceive {
+											sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+											address:source_address.clone(),
+											timestamp:now_utc(),
+										});
+										if let Some(_) =  server.unacked_packets.remove(&received_packet.hash) {
+											match self.send_packet(&server_id,&vec![0x06],&received_packet.hash,&received_packet.crypt_tag,&source_address) {
+												Err(why) => return Err(why),
+												Ok(_) => (),
+											};
+										} else {
+											match self.send_packet(&server_id,&vec![0x11],&vec![],&received_packet.crypt_tag,&source_address) {
+												Err(why) => return Err(why),
+												Ok(hash) => {
+													server.unacked_packets.insert(hash.clone(),UnackedPacket {
+														timestamp:milliseconds_now(),
+														tries:0,
+														source:server_address.clone(),
+														destination_hash:hash.clone(),
+														origin_hash:hash.clone(),
+														destination:source_address.clone(),
+														sender:server_id.clone(),
+														recipient:Vec::new(),
+														parameter:vec![0x11],
+														payload:Vec::new(),
+													});
+												},
+											};
+											self.event_stream.push_back(Event::ServerLinkSend {
+												address:source_address.clone(),
+												timestamp:now_utc(),
+											});
+										}
 									} else {
 										match self.send_packet(&server_id,&vec![0x15],&received_packet.hash,&received_packet.crypt_tag,&source_address) {
 											Err(why) => return Err(why),
@@ -2258,6 +2405,9 @@ impl Server {
 								if let Some(cancelled_con) = self.client_connections.remove(&source_address) {
 									self.identities_in_use.remove(&cancelled_con.identity.tag);
 									self.names_in_use.remove(&cancelled_con.identity.name);
+								} else if let Some(cancelled_server) = self.server_connections.remove(&source_address) {
+									self.identities_in_use.remove(&cancelled_server.identity.tag);
+									self.names_in_use.remove(&cancelled_server.identity.name);
 								}
 								match self.send_packet(&server_id,&vec![0x19],&vec![],&received_packet.crypt_tag,&source_address) {
 									Err(why) => return Err(why),
