@@ -1588,13 +1588,13 @@ pub struct Server {
 	identities_in_use:HashSet<Vec<u8>>,
 	names_in_use:HashSet<String>,
 	recent_packets:VecDeque<Vec<u8>>,
-	connecting_servers:HashSet<SocketAddr>,
 	pub name:String,
 	pub address:SocketAddr,
 	pub identity:Identity,
 	pub identities:HashMap<Vec<u8>,Identity>,
 	pub client_connections:HashMap<SocketAddr,ClientConnection>,
 	pub server_connections:HashMap<SocketAddr,ServerConnection>,
+	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,
 	pub max_connections:usize,
 	pub ban_points:HashMap<IpAddr,u64>,
 	pub max_ban_points:u64,
@@ -1640,7 +1640,7 @@ pub fn new_server(identity_file:&Path,port:&u16) -> Result<Server,io::Error> {
 				socket:socket,
 				client_connections:HashMap::new(),
 				server_connections:HashMap::new(),
-				connecting_servers:HashSet::new(),
+				unacked_packets:HashMap::new(),
 				identity:server_identity.clone(),
 				identities:HashMap::new(),
 				identities_in_use:HashSet::new(),
@@ -1843,7 +1843,7 @@ impl Server {
 		match self.send_packet(&server_id,&vec![0x11],&vec![],&server_tag,&remote_address) {
 			Err(why) => return Err(why),
 			Ok(hash) => {
-				remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
+				self.unacked_packets.insert(hash.clone(),UnackedPacket {
 					timestamp:milliseconds_now(),
 					tries:0,
 					source:server_address,
@@ -1871,7 +1871,7 @@ impl Server {
 		match self.send_packet(&server_id,&vec![0x18],&vec![],&server_tag,&remote_address) {
 			Err(why) => return Err(why),
 			Ok(hash) => {
-				remote_con.unacked_packets.insert(hash.clone(),UnackedPacket {
+				self.unacked_packets.insert(hash.clone(),UnackedPacket {
 					timestamp:milliseconds_now(),
 					tries:0,
 					source:server_address,
@@ -2227,16 +2227,16 @@ impl Server {
 											address:source_address.clone(),
 											timestamp:now_utc(),
 										});
-										if let Some(_) =  server.unacked_packets.remove(&received_packet.hash) {
+										if let Some(_) =  self.unacked_packets.remove(&received_packet.hash) {
 											match self.send_packet(&server_id,&vec![0x06],&received_packet.hash,&received_packet.crypt_tag,&source_address) {
 												Err(why) => return Err(why),
 												Ok(_) => (),
 											};
 										} else {
-											match self.send_packet(&server_id,&vec![0x11],&vec![],&received_packet.crypt_tag,&source_address) {
+											match self.send_packet(&server_id,&vec![0x11],&vec![],&server_tag,&source_address) {
 												Err(why) => return Err(why),
 												Ok(hash) => {
-													server.unacked_packets.insert(hash.clone(),UnackedPacket {
+													self.unacked_packets.insert(hash.clone(),UnackedPacket {
 														timestamp:milliseconds_now(),
 														tries:0,
 														source:server_address.clone(),
