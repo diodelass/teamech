@@ -2812,6 +2812,15 @@ impl Server {
 		let mut outbound_packets:Vec<(Vec<u8>,Vec<u8>,SocketAddr)> = Vec::new();
 		let mut match_count:u64 = 0;
 		let send:bool = packet.payload.len() > 0;
+		let routing_expression_bytes:Vec<u8>;
+		if packet.parameter.len() == 1 {
+			routing_expression_bytes = Vec::new();
+		} else if packet.parameter.len() >= 2 && packet.parameter[1] == 0x01 {
+			routing_expression_bytes = packet.parameter[2..].to_vec();
+		} else {
+			routing_expression_bytes = packet.parameter[1..].to_vec();
+		}
+		let routing_expression = String::from_utf8_lossy(&routing_expression_bytes).to_string();
 		for server in self.server_connections.values_mut() {
 			if server.address == packet.source {
 				continue;
@@ -2822,15 +2831,6 @@ impl Server {
 				for class in remote_con.classes.iter() {
 					con_identifiers.push_str(&format!("#{} ",class));
 				}
-				let routing_expression_bytes:Vec<u8>;
-				if packet.parameter.len() == 1 {
-					routing_expression_bytes = Vec::new();
-				} else if packet.parameter.len() >= 2 && packet.parameter[1] == 0x01 {
-					routing_expression_bytes = packet.parameter[2..].to_vec();
-				} else {
-					routing_expression_bytes = packet.parameter[1..].to_vec();
-				}
-				let routing_expression = String::from_utf8_lossy(&routing_expression_bytes).to_string();
 				let matched:bool = wordmatch(&routing_expression,&con_identifiers);
 				if matched || remote_con.classes.contains(&String::from("supervisor")) {
 					if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&server.identity.tag,&identities) {
@@ -2874,7 +2874,7 @@ impl Server {
 			for class in client.identity.classes.iter() {
 				con_identifiers.push_str(&format!("#{} ",class));
 			}
-			let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&con_identifiers);
+			let matched:bool = wordmatch(&routing_expression,&con_identifiers);
 			if matched || client.identity.classes.contains(&String::from("supervisor")) {
 				if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&client.identity.tag,&identities) {
 					if send {
