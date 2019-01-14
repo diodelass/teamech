@@ -1,4 +1,5 @@
 // Teamech v 0.12.1 November 2018
+// rustc v. 1.31.1
 // License: AGPL v3
 
 // Editor Recommendations
@@ -20,7 +21,9 @@ I. Network
 		1. IPv4																	[X]
 		2. IPv6																	[X]
 		3. DNS resolution												[-]
-	C. Bulk data/file transfers								[X]
+	C. Bulk data/file transfers								[ ]
+		1. Transmission													[ ]
+		2. Reception														[X]
 II. Server																		
 	A. Connections														[X]
 		1. Acceptance														[X]
@@ -43,9 +46,9 @@ II. Server
 		5. Handling acknowledgements						[X]
 			a. Resending													[X]
 			b. Relaying acks back to source				[X]
-	C. Server-Server Links										[ ]
-		1. Opening															[ ] 
-		2. Closing															[ ]
+	C. Server-Server Links										[X]
+		1. Opening															[X] 
+		2. Closing															[X]
 III. Client																	
 	A. Connecting															[X]
 		1. Opening connection										[X]
@@ -65,7 +68,7 @@ V. Logging																	[X]
 */
 
 /* Overview of Control Codes
-0x01 - START OF HEADING - Unassigned
+0x01 - START OF HEADING - Bulk transmission segment
 0x02 - START OF TEXT - Connection request
 0x03 - END OF TEXT - Match test response
 0x04 - END OF TRANSMISSION - Connected client list response
@@ -111,6 +114,8 @@ use std::path::Path;
 use std::collections::{VecDeque,HashMap,HashSet};
 use std::time::Duration;
 use std::net::{UdpSocket,SocketAddr,IpAddr,Ipv4Addr};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash,Hasher};
 
 fn print_time(now:&Tm) -> String {
 	let mut micros:String = format!("{}",now.tm_nsec/1_000);
@@ -155,6 +160,13 @@ fn bytes_to_u64(bytes:&[u8]) -> u64 {
 		number += (bytes[x] as u64) << (8*x)
 	}
 	return number;
+}
+
+fn internal_hash(bytes:&[u8]) -> Vec<u8> {
+	// uses SipHash, Rust's current default hasher
+	let mut hasher = DefaultHasher::new();
+	bytes.hash(&mut hasher);
+	return u64_to_bytes(&hasher.finish()).to_vec();
 }
 
 fn get_rand_bytes(buffer:&mut [u8]) -> Result<(),io::Error> {
@@ -517,6 +529,31 @@ pub enum Event {
 		reason:String,
 		timestamp:Tm,
 	},
+	BeginSendTransmission {
+		destination:String,
+		size:usize,
+		id:Vec<u8>,
+		timestamp:Tm,
+	},
+	EndSendTransmission {
+		destination:String,
+		size:usize,
+		id:Vec<u8>,
+		timestamp:Tm,
+	},
+	BeginReceiveTransmission {
+		sender:String,
+		size:usize,
+		id:Vec<u8>,
+		timestamp:Tm,
+	},
+	EndReceiveTransmission {
+		sender:String,
+		size:usize,
+		data:Vec<u8>,
+		id:Vec<u8>,
+		timestamp:Tm,
+	},
 	TestMessage {
 		// we're a server and we've just received a packet that has a routing expression, but no payload.
 		// this means that it's a test packet that shouldn't actually be relayed.
@@ -626,127 +663,139 @@ impl Event {
 		match self {
 			Event::Acknowledge {timestamp,hash,sender,address,matches} => {
 				if matches > &0 {
-					return format!("[{}] ack [{}] - {} [{}] ({})",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address,&matches);
+					return format!("[{}] ack [{}] - {} [{}] ({})",print_time(&timestamp),bytes_to_tag(&hash),sender,address,matches);
 				} else {
-					return format!("[{}] ack [{}] - {} [{}]",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address);
+					return format!("[{}] ack [{}] - {} [{}]",print_time(&timestamp),bytes_to_tag(&hash),sender,address);
 				}
 			},
 			Event::Refusal {timestamp,hash,sender,address} => {
-				return format!("[{}] nak [{}] - {} [{}]",&print_time(&timestamp),bytes_to_tag(&hash),&sender,&address);
+				return format!("[{}] nak [{}] - {} [{}]",print_time(&timestamp),bytes_to_tag(&hash),sender,address);
 			},
 			Event::ServerCreate {timestamp,address} => {
-				return format!("[{}] Server initialized on {}.",&print_time(&timestamp),&address);
+				return format!("[{}] Server initialized on {}.",print_time(&timestamp),address);
 			},
 			Event::ClientCreate {timestamp,address} => {
-				return format!("[{}] Client initialized on {}.",&print_time(&timestamp),&address);
+				return format!("[{}] Client initialized on {}.",print_time(&timestamp),address);
 			},
 			Event::ServerConnect {timestamp,sender,address} => {
-				return format!("[{}] Connection opened by {} [{}]",&print_time(&timestamp),&sender,&address);
+				return format!("[{}] Connection opened by {} [{}]",print_time(&timestamp),sender,address);
 			},
 			Event::ServerConnectFailure {timestamp,sender,address,reason} => {
-				return format!("[{}] Rejected connection request from {} [{}]: {}",&print_time(&timestamp),&sender,&address,&reason);
+				return format!("[{}] Rejected connection request from {} [{}]: {}",print_time(&timestamp),sender,address,reason);
 			},
 			Event::ServerDisconnect {timestamp,sender,address,reason} => {
-				return format!("[{}] Connection closed for {} [{}] ({})",&print_time(&timestamp),&sender,&address,&reason);
+				return format!("[{}] Connection closed for {} [{}] ({})",print_time(&timestamp),sender,address,reason);
 			},
 			Event::ClientConnect {timestamp,sender,address} => {
-				return format!("[{}] Connected to server {} at [{}]",&print_time(&timestamp),&sender,&address);
+				return format!("[{}] Connected to server {} at [{}]",print_time(&timestamp),sender,address);
 			},
 			Event::ClientConnectFailure {timestamp,address,reason} => {
-				return format!("[{}] Failed to connect to server at [{}]: {}",&print_time(&timestamp),&address,&reason);
+				return format!("[{}] Failed to connect to server at [{}]: {}",print_time(&timestamp),address,reason);
 			},
 			Event::ClientDisconnect {timestamp,address,reason} => {
-				return format!("[{}] Disconnected from server at [{}]: {}",&print_time(&timestamp),&address,&reason);
+				return format!("[{}] Disconnected from server at [{}]: {}",print_time(&timestamp),address,reason);
 			},
 			Event::ClientDisconnectFailure {timestamp,address,reason} => {
-				return format!("[{}] Failed to disconnect from server at [{}]: {}",&print_time(&timestamp),&address,&reason);
+				return format!("[{}] Failed to disconnect from server at [{}]: {}",print_time(&timestamp),address,reason);
 			},
 			Event::RemoteConnect {timestamp,sender,server} => {
-				return format!("[{}] Remote client {} has connected to server {}",&print_time(&timestamp),&sender,&server);
+				return format!("[{}] Remote client {} has connected to server {}",print_time(&timestamp),sender,server);
 			}
 			Event::RemoteDisconnect {timestamp,sender,server} => {
-				return format!("[{}] Remote client {} has disconnected from server {}",&print_time(&timestamp),&sender,&server);
+				return format!("[{}] Remote client {} has disconnected from server {}",print_time(&timestamp),sender,server);
 			}
 			Event::ServerLinkSend {timestamp,address} => {
-				return format!("[{}] {} <- Establishing server-to-server link",&print_time(&timestamp),&address);
+				return format!("[{}] {} <- Establishing server-to-server link",print_time(&timestamp),address);
 			},
 			Event::ServerLinkReceive {timestamp,sender,address} => {
-				return format!("[{}] {} [{}] -> Received establishment of server-to-server link",&print_time(&timestamp),&sender,&address);
+				return format!("[{}] {} [{}] -> Received establishment of server-to-server link",print_time(&timestamp),sender,address);
 			},
 			Event::ServerUnlinkSend {timestamp,reason,address} => {
-				return format!("[{}] {} <- Closing server-to-server link ({})",&print_time(&timestamp),&address,&reason);
+				return format!("[{}] {} <- Closing server-to-server link ({})",print_time(&timestamp),address,reason);
 			},
 			Event::ServerUnlinkReceive {timestamp,sender,reason,address} => {
-				return format!("[{}] {} [{}] -> Received closure of server-to-server link ({})",&print_time(&timestamp),&sender,&address,&reason);
+				return format!("[{}] {} [{}] -> Received closure of server-to-server link ({})",print_time(&timestamp),sender,address,reason);
 			},
 			Event::ReceivePacket {timestamp,sender,address,parameter,payload,hash} => {
-				return format!("[{}] recv({} [{}]): [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
+				return format!("[{}] recv({} [{}]): [{}] [{}] {}",print_time(&timestamp),sender,address,bytes_to_tag(&hash),
 					view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::ReceiveMessage {timestamp,sender,address,parameter,payload,hash} => {
-				return format!("[{}] {} [{}] -> [{}] [{}] {}",&print_time(&timestamp),&sender,&address,&bytes_to_tag(&hash),
+				return format!("[{}] {} [{}] -> [{}] [{}] {}",print_time(&timestamp),sender,address,bytes_to_tag(&hash),
 					view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::ReceiveFailure {timestamp,reason} => {
-				return format!("[{}] Could not receive packet: {}",&print_time(&timestamp),&reason);
+				return format!("[{}] Could not receive packet: {}",print_time(&timestamp),reason);
 			},
 			Event::SendPacket {timestamp,destination,address,parameter,payload,hash} => {
-				return format!("[{}] send({} [{}]): [{}] [{}] {}",&print_time(&timestamp),&destination,&address,
-					&bytes_to_tag(&hash),view_bytes(&parameter),view_bytes(&payload));
+				return format!("[{}] send({} [{}]): [{}] [{}] {}",print_time(&timestamp),destination,address,
+					bytes_to_tag(&hash),view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::SendMessage {timestamp,destination,address,parameter,payload,hash} => {
-				return format!("[{}] {} [{}] <- [{}] [{}] {}",&print_time(&timestamp),&destination,&address,
-					&bytes_to_tag(&hash),view_bytes(&parameter),view_bytes(&payload));
+				return format!("[{}] {} [{}] <- [{}] [{}] {}",print_time(&timestamp),destination,address,
+					bytes_to_tag(&hash),view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::SendFailure {timestamp,destination,address,reason} => {
-				return format!("[{}] Could not send packet to {} [{}]: {}",&print_time(&timestamp),&destination,&address,&reason);
+				return format!("[{}] Could not send packet to {} [{}]: {}",print_time(&timestamp),destination,address,reason);
+			},
+			Event::BeginSendTransmission {timestamp,destination,size,id} => {
+				return format!("[{}] Sending transmission [{}] ({} blocks) to {}",print_time(&timestamp),view_bytes(&id),size,destination);
+			},
+			Event::EndSendTransmission {timestamp,destination,size,id} => {
+				return format!("[{}] Finished sending transmission [{}] ({} blocks) to {}",print_time(&timestamp),view_bytes(&id),size,destination);
+			},
+			Event::BeginReceiveTransmission {timestamp,sender,size,id} => {
+				return format!("[{}] Receiving transmission [{}] ({} blocks) from {}",print_time(&timestamp),view_bytes(&id),size,sender);
+			},
+			Event::EndReceiveTransmission {timestamp,sender,size,data:_,id} => {
+				return format!("[{}] Finished receiving [{}] ({} blocks) from {}",print_time(&timestamp),view_bytes(&id),size,sender);
 			},
 			Event::TestMessage {timestamp,sender,address,parameter,matches} => {
-				return format!("[{}] {} [{}] -> Match test: [{}] [matches {}]",&print_time(&timestamp),&sender,&address,
-					view_bytes(&parameter),&matches);
+				return format!("[{}] {} [{}] -> Match test: [{}] [matches {}]",print_time(&timestamp),sender,address,
+					view_bytes(&parameter),matches);
 			},
 			Event::TestResponse {timestamp,sender,address,hash:_,matches} => {
-				return format!("[{}] Match test response from {} [{}]: matches {}",&print_time(&timestamp),&sender,&address,&matches);
+				return format!("[{}] Match test response from {} [{}]: matches {}",print_time(&timestamp),sender,address,matches);
 			},
 			Event::RoutedMessage {timestamp,parameter,payload,destination,address} => {
-				return format!("[{}] Relay: [{}] {} -> {} [{}]",&print_time(&timestamp),
-					view_bytes(&parameter),view_bytes(&payload),&destination,&address);
+				return format!("[{}] Relay: [{}] {} -> {} [{}]",print_time(&timestamp),
+					view_bytes(&parameter),view_bytes(&payload),destination,address);
 			},
 			Event::InvalidMessage {timestamp,reason,sender,address,parameter,payload} => {
-				return format!("[{}] [{}] {} [{}] -> [{}] {}",&print_time(&timestamp),&reason,&sender,&address,
+				return format!("[{}] [{}] {} [{}] -> [{}] {}",print_time(&timestamp),reason,sender,address,
 					view_bytes(&parameter),view_bytes(&payload));
 			},
 			Event::DeliveryRetry {timestamp,parameter,payload,destination,address} => {
-				return format!("[{}] [resending] [{}] {} -> {} [{}]",&print_time(&timestamp),
-					view_bytes(&parameter),view_bytes(&payload),&destination,&address);
+				return format!("[{}] [resending] [{}] {} -> {} [{}]",print_time(&timestamp),
+					view_bytes(&parameter),view_bytes(&payload),destination,address);
 			},
 			Event::DeliveryFailure {timestamp,reason,parameter,payload,destination,address} => {
-				return format!("[{}] [delivery failed: {}] [{}] {} -> {} [{}]",&print_time(&timestamp),&reason,
-					view_bytes(&parameter),view_bytes(&payload),&destination,&address);
+				return format!("[{}] [delivery failed: {}] [{}] {} -> {} [{}]",print_time(&timestamp),reason,
+					view_bytes(&parameter),view_bytes(&payload),destination,address);
 			},
 			Event::ClientListRequest {timestamp,sender,address} => {
-				return format!("[{}] client list requested by {} [{}]",&print_time(&timestamp),&sender,&address);
+				return format!("[{}] client list requested by {} [{}]",print_time(&timestamp),sender,address);
 			},
 			Event::ClientListResponse {timestamp,sender:_,address:_,payload} => {
-				return format!("[{}] client list - {}",&print_time(&timestamp),&payload);
+				return format!("[{}] client list - {}",print_time(&timestamp),payload);
 			},
 			Event::ClientListEnd {timestamp,sender,address} => {
-				return format!("[{}] end of client list from {} [{}]",&print_time(&timestamp),&sender,&address);
+				return format!("[{}] end of client list from {} [{}]",print_time(&timestamp),sender,address);
 			},
 			Event::IdentityLoad {timestamp,filename,name,classes,tag} => {
-				return format!("[{}] found identity at {}: @{}/#{} [{}]",&print_time(&timestamp),&filename,&name,&classes[0],bytes_to_tag(&tag));
+				return format!("[{}] found identity at {}: @{}/#{} [{}]",print_time(&timestamp),filename,name,classes[0],bytes_to_tag(&tag));
 			},
 			Event::IdentityLoadFailure {timestamp,filename,reason} => {
-				return format!("[{}] failed to open identity file at {}: {}",&print_time(&timestamp),filename,reason);
+				return format!("[{}] failed to open identity file at {}: {}",print_time(&timestamp),filename,reason);
 			},
 			Event::NullEncrypt {timestamp,address} => {
-				return format!("[{}] WARNING: sending unsecured message to {} due to missing keys!",&print_time(&timestamp),&address);
+				return format!("[{}] WARNING: sending unsecured message to {} due to missing keys!",print_time(&timestamp),address);
 			},
 			Event::NullDecrypt {timestamp,address} => {
-				return format!("[{}] WARNING: receiving unsecured message from {} due to missing keys!",&print_time(&timestamp),&address);
+				return format!("[{}] WARNING: receiving unsecured message from {} due to missing keys!",print_time(&timestamp),address);
 			},
 			Event::UnknownSender {timestamp,address} => {
-				return format!("[{}] Alert: no identity found for message from {}",&print_time(&timestamp),&address);
+				return format!("[{}] Alert: no identity found for message from {}",print_time(&timestamp),address);
 			},
 		};
 	}
@@ -793,20 +842,37 @@ pub struct UnackedPacket {
 	pub payload:Vec<u8>,					// message payload
 }
 
+struct ReceivingTransmission {
+	id:Vec<u8>,
+	blocks_received:Vec<Vec<u8>>,
+	blocks_needed:HashSet<usize>,
+}
+
+struct SendingTransmission {
+	id:Vec<u8>,
+	blocks:VecDeque<Vec<u8>>,
+	length:usize,
+	position:usize,
+	routing_expression:Vec<u8>,
+}
+
 // object representing a Teamech client, with methods for sending and receiving packets.
 pub struct Client {
-	pub socket:UdpSocket,																// local socket for transceiving data
-	pub address:SocketAddr,
-	pub server_address:SocketAddr,											// address of server we're connected to
-	pub identity:Identity,
-	pub connected:bool,																	// are we connected?
-	pub event_stream:VecDeque<Event>,										// log of events produced by the client
-	pub last_number_matched:VecDeque<([u8;8],u64)>,			// tracks ack match-count reporting
-	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,	// packets that need to be resent if they aren't acknowledged
-	pub recent_packets:VecDeque<Vec<u8>>,								// hashes of packets that were recently seen, to merge double-sends
-	pub max_recent_packets:usize,												// max number of recent packet hashes to store
-	pub max_resend_tries:u64,														// maximum number of tries to resend a packet before discarding it
-	pub time_tolerance_ms:i64,													// maximum time difference a packet can have from now
+	receiving_transmissions:HashMap<Vec<u8>,ReceivingTransmission>,	// contains the multi-packet transfers currently being received by the client.
+	sending_transmissions:VecDeque<SendingTransmission>,						// contains the multi-packet transfers currently being sent by the client.
+	socket:UdpSocket,																								// local socket for transceiving data
+	last_number_matched:VecDeque<([u8;8],u64)>,											// tracks ack match-count reporting
+	unacked_packets:HashMap<Vec<u8>,UnackedPacket>,									// packets that need to be resent if they aren't acknowledged
+	recent_packets:VecDeque<Vec<u8>>,																// hashes of packets that were recently seen, to merge double-sends
+	pub address:SocketAddr,																					// this client's local address
+	pub server_address:SocketAddr,																	// address of server we're connected to
+	pub identity:Identity,																					// this client's identity
+	pub connected:bool,																							// are we connected?
+	pub event_stream:VecDeque<Event>,																// log of events produced by the client
+	pub max_recent_packets:usize,																		// max number of recent packet hashes to store
+	pub max_resend_tries:u64,																				// maximum number of tries to resend a packet before discarding it
+	pub time_tolerance_ms:i64,																			// maximum time difference a packet can have from now
+	pub simultaneous_transmissions:bool,														// whether or not multi-packet transmissions should be sent sequentially or simultaneously.
 }
 
 pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,local_port:u16) -> Result<Client,io::Error> {
@@ -834,10 +900,13 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 				connected:false,
 				unacked_packets:HashMap::new(),
 				recent_packets:VecDeque::new(),
+				receiving_transmissions:HashMap::new(),
+				sending_transmissions:VecDeque::new(),
 				max_recent_packets:32,
 				max_resend_tries:3,
 				identity:new_identity,
 				time_tolerance_ms:3000,
+				simultaneous_transmissions:true,
 			};
 			match created_client.set_recv_wait(1000) {
 				Err(why) => return Err(why),
@@ -889,9 +958,7 @@ impl Client {
 					});
 				}
 			} else {
-				let mut sha3 = Keccak::new_shake128();
-				sha3.update(&bottle);
-				sha3.finalize(&mut hash_bytes);
+				hash_bytes = internal_hash(&bottle);
 				let decryption = self.identity.decrypt(&bottle);
 				decrypted_bytes = decryption.message;
 				timestamp = decryption.timestamp;
@@ -957,6 +1024,34 @@ impl Client {
 				// if we're processing a huge volume of packets at once, occasionally take a break
 				// to allow other functions to run.
 				break;
+			}
+			if let Some(mut transmission) = self.sending_transmissions.pop_front() {
+				let mut parameter:Vec<u8> = vec![b'>',0x01];
+				parameter.append(&mut transmission.routing_expression.clone());
+				parameter.append(&mut transmission.id.clone());
+				parameter.append(&mut u64_to_bytes(&(transmission.position as u64)).to_vec());
+				parameter.append(&mut u64_to_bytes(&(transmission.length as u64)).to_vec());
+				if let Some(block) = transmission.blocks.pop_front() {
+					match self.send_packet(&parameter,&block) {
+						Err(why) => return Err(why),
+						Ok(_) => (),
+					};
+				}
+				if transmission.blocks.len() > 0 {
+					transmission.position = transmission.length-transmission.blocks.len();
+					if self.simultaneous_transmissions {
+						self.sending_transmissions.push_back(transmission);
+					} else {
+						self.sending_transmissions.push_front(transmission);
+					}
+				} else {
+					self.event_stream.push_back(Event::EndSendTransmission {
+						destination:String::from_utf8_lossy(&transmission.routing_expression).to_string(),
+						size:transmission.length,
+						id:transmission.id.clone(),
+						timestamp:now_utc(),
+					});
+				}
 			}
 			match self.socket.recv_from(&mut input_buffer) {
 				Err(why) => match why.kind() {
@@ -1128,10 +1223,56 @@ impl Client {
 										hash:received_packet.hash.clone(),
 										timestamp:now_utc(),
 									});
-									match self.send_packet(&vec![0x06],&received_packet.hash) {
-										Err(why) => return Err(why),
-										Ok(_) => (),
-									};
+									if received_packet.parameter.len() >= 26 && received_packet.parameter[1] == 0x01 {
+										let transmission_param = received_packet.parameter[received_packet.parameter.len()-24..].to_vec();
+										let transmission_id:Vec<u8> = transmission_param[..8].to_vec();
+										let transmission_position:usize = bytes_to_u64(&transmission_param[8..16].to_vec()) as usize;
+										let transmission_length:usize = bytes_to_u64(&transmission_param[16..].to_vec()) as usize;
+										let mut this_transmission = match self.receiving_transmissions.remove(&transmission_id) {
+											None => {
+												let mut blocks_needed:HashSet<usize> = HashSet::new();
+												for x in 0..transmission_length {
+													blocks_needed.insert(x);
+												}
+												self.event_stream.push_back(Event::BeginReceiveTransmission {
+													sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+													size:transmission_length,
+													id:transmission_id.clone(),
+													timestamp:now_utc(),
+												});
+												ReceivingTransmission {
+													id:transmission_id.clone(),
+													blocks_received:vec![vec![];transmission_length],
+													blocks_needed:blocks_needed,
+												}
+											},
+											Some(transmission) => transmission,
+										};
+										if transmission_position < this_transmission.blocks_received.len() {
+											this_transmission.blocks_received[transmission_position] = received_packet.payload.clone();
+											this_transmission.blocks_needed.remove(&transmission_position);
+											match self.send_packet(&vec![0x06],&received_packet.hash) {
+												Err(why) => return Err(why),
+												Ok(_) => (),
+											};
+										} else {
+											match self.send_packet(&vec![0x15],&received_packet.hash) {
+												Err(why) => return Err(why),
+												Ok(_) => (),
+											};
+										}
+										if this_transmission.blocks_needed.len() > 0 {
+											self.receiving_transmissions.insert(this_transmission.id.clone(),this_transmission);
+										} else {
+											self.event_stream.push_back(Event::EndReceiveTransmission {
+												sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+												size:transmission_length,
+												data:this_transmission.blocks_received.concat(),
+												id:transmission_id.clone(),
+												timestamp:now_utc(),
+											});
+										}
+									}
 								},
 								(_,_) => {
 									self.event_stream.push_back(Event::InvalidMessage {
@@ -1178,6 +1319,44 @@ impl Client {
 		return Ok(());
 	}
 
+	pub fn transmit_data(&mut self,routing_expression:&Vec<u8>,data:&Vec<u8>) -> Result<(),io::Error> {
+		// max UDP payload size: 508 bytes
+		// teacrypt overhead: 32 bytes
+		// multi-packet ordering information overhead: 24 bytes
+		// parameter flags: 2 bytes
+		// routing expression: variable length
+		// absolute maximum transmission block size (with zero-length routing expression): 450 bytes
+		// safety margin: 50 bytes
+		if routing_expression.len() >= 400 {
+			return Err(io::Error::new(io::ErrorKind::InvalidData,"routing expression too long"));
+		}
+		let mut transmission_id:Vec<u8> = vec![0;8];
+		match get_rand_bytes(&mut transmission_id) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
+		let block_size:usize = 400-routing_expression.len();
+		let mut blocks:VecDeque<Vec<u8>> = VecDeque::with_capacity(1+data.len()/block_size);
+		for block in data.chunks(block_size) {
+			blocks.push_back(block.to_vec());
+		}
+		let transmission_length = blocks.len();
+		self.sending_transmissions.push_back(SendingTransmission {
+			id:transmission_id.clone(),
+			blocks:blocks,
+			position:0,
+			length:transmission_length,
+			routing_expression:routing_expression.clone(),
+		});
+		self.event_stream.push_back(Event::BeginSendTransmission {
+			destination:String::from_utf8_lossy(&routing_expression).to_string(),
+			size:transmission_length,
+			id:transmission_id,
+			timestamp:now_utc(),
+		});
+		return Ok(())
+	}
+
 	// encrypts and transmits a payload of bytes to the server.
 	pub fn send_packet(&mut self,parameter:&Vec<u8>,payload:&Vec<u8>) -> Result<Vec<u8>,io::Error> {
 		let mut message:Vec<u8> = Vec::new();
@@ -1201,10 +1380,7 @@ impl Client {
 			},
 			Ok(_) => (),
 		};
-		let mut packet_hash:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_shake128();
-		sha3.update(&bottle);
-		sha3.finalize(&mut packet_hash);
+		let packet_hash:Vec<u8> = internal_hash(&bottle);
 		if parameter.len() > 0 && [b'>'].contains(&&parameter[0]) {
 			self.event_stream.push_back(Event::SendMessage {
 				destination:String::from("server"),
@@ -1476,10 +1652,7 @@ crypt_tag:&Vec<u8>,identities:&HashMap<Vec<u8>,Identity>) -> Result<(Vec<u8>,Vec
 	} else {
 		return Err(io::Error::new(io::ErrorKind::NotFound,"corresponding key not found"));
 	}
-	let mut packet_hash:Vec<u8> = vec![0;8];
-	let mut sha3 = Keccak::new_shake128();
-	sha3.update(&bottle);
-	sha3.finalize(&mut packet_hash);
+	let packet_hash:Vec<u8> = internal_hash(&bottle);
 	return Ok((packet_hash,bottle));
 }
 
@@ -1577,34 +1750,35 @@ pub struct ServerConnection {
 
 #[derive(Clone)]
 pub struct RemoteConnection {
-	pub name:String,
-	pub classes:Vec<String>,
-	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,
+	pub name:String,																			// this client's unique name
+	pub classes:Vec<String>,															// this client's classes
+	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,		// the packets awaiting acknowledgement by this client
 }
 
 // server object for holding server parameters and connections.
 pub struct Server {
-	socket:UdpSocket,
-	identities_in_use:HashSet<Vec<u8>>,
-	names_in_use:HashSet<String>,
-	recent_packets:VecDeque<Vec<u8>>,
-	pub name:String,
-	pub address:SocketAddr,
-	pub identity:Identity,
-	pub identities:HashMap<Vec<u8>,Identity>,
-	pub client_connections:HashMap<SocketAddr,ClientConnection>,
-	pub server_connections:HashMap<SocketAddr,ServerConnection>,
-	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,
-	pub max_connections:usize,
-	pub ban_points:HashMap<IpAddr,u64>,
-	pub max_ban_points:u64,
-	pub banned_addresses:HashSet<IpAddr>,
-	pub max_recent_packets:usize,
-	pub max_unsent_packets:usize,
-	pub max_resend_tries:u64,
-	pub max_resend_failures:u64,
-	pub event_stream:VecDeque<Event>,
-	pub time_tolerance_ms:i64,
+	socket:UdpSocket,																									// this server's UDP socket
+	identities_in_use:HashSet<Vec<u8>>,																// registered identities which are already assigned and not available to new connections
+	names_in_use:HashSet<String>,																			// identity names that are in use and not available to new connections
+	recent_packets_deque:VecDeque<Vec<u8>>,														// packets recently seen, for filtering replays
+	recent_packets_set:HashSet<Vec<u8>>,															// same contents as recent_packets_deque, but can be constant-time indexed
+	pub name:String,																									// this server's unique name
+	pub address:SocketAddr,																						// this server's socket address
+	pub identity:Identity,																						// this server's identity, for connecting to other servers
+	pub identities:HashMap<Vec<u8>,Identity>,													// identities this server has on file
+	pub client_connections:HashMap<SocketAddr,ClientConnection>,			// clients connected to this server
+	pub server_connections:HashMap<SocketAddr,ServerConnection>,			// other servers connected to this server
+	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,								// global unacked packets that can be acked by any connection
+	pub max_connections:usize,																				// the most connections this server will allow before rejecting new connections
+	pub ban_points:HashMap<IpAddr,u64>,																// ledger of misbehavior counts for each known IP address
+	pub max_ban_points:u64,																						// threshold number of misbehavior events before banning an address
+	pub banned_addresses:HashSet<IpAddr>,															// addresses banned for misbehavior
+	pub max_recent_packets:usize,																			// maximum size of the recent packet list
+	pub max_unsent_packets:usize,																			// maximum number of accumulated unsent packets before terminating a client connection
+	pub max_resend_tries:u64,																					// maximum number of times to retry delivery of a packet before giving up
+	pub max_resend_failures:u64,																			// maximum number of failed deliveries before terminating a client connection
+	pub event_stream:VecDeque<Event>,																	// stream of Event objects describing server status and packet contents
+	pub time_tolerance_ms:i64,																				// most time in the future or past a packet's timestamp can be and still be valid
 }
 
 // server constructor, works very similarly to client constructor
@@ -1649,9 +1823,10 @@ pub fn new_server(identity_file:&Path,port:&u16) -> Result<Server,io::Error> {
 				ban_points:HashMap::new(),
 				max_ban_points:10,
 				banned_addresses:HashSet::new(),
-				recent_packets:VecDeque::new(),
+				recent_packets_deque:VecDeque::new(),
+				recent_packets_set:HashSet::new(),
 				event_stream:VecDeque::new(),
-				max_recent_packets:64,
+				max_recent_packets:1024,
 				max_unsent_packets:32,
 				max_resend_tries:3,
 				max_resend_failures:1,
@@ -1719,10 +1894,7 @@ impl Server {
 		let mut sender_bytes:Vec<u8> = Vec::new();
 		let mut parameter_bytes:Vec<u8> = Vec::new();
 		let mut payload_bytes:Vec<u8> = Vec::new();
-		let mut hash_bytes:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_shake128();
-		sha3.update(&bottle);
-		sha3.finalize(&mut hash_bytes);
+		let hash_bytes:Vec<u8> = internal_hash(&bottle);
 		if bottle.len() >= 40 {
 			let decryption:Decrypt;
 			if let Some(identity) = self.identities.get(&bottle[bottle.len()-8..]) {
@@ -1938,10 +2110,7 @@ impl Server {
 			},
 			Ok(_) => (),
 		};
-		let mut packet_hash:Vec<u8> = vec![0;8];
-		let mut sha3 = Keccak::new_shake128();
-		sha3.update(&bottle);
-		sha3.finalize(&mut packet_hash);
+		let packet_hash:Vec<u8> = internal_hash(&bottle);
 		self.event_stream.push_back(Event::SendPacket {
 			destination:String::from("client"),
 			address:address.clone(),
@@ -1972,7 +2141,6 @@ impl Server {
 		};
 	}
 
-
 	pub fn process_packets(&mut self) -> Result<(),io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
 		loop {
@@ -1993,10 +2161,7 @@ impl Server {
 					if self.banned_addresses.contains(&source_address.ip()) {
 						continue;
 					}
-					let mut packet_hash:Vec<u8> = vec![0;8];
-					let mut sha3 = Keccak::new_shake128();
-					sha3.update(&input_buffer[..receive_length]);
-					sha3.finalize(&mut packet_hash);
+					let mut packet_hash:Vec<u8> = internal_hash(&input_buffer[..receive_length]);
 					let mut current_ban_points:u64 = 0;
 					if let Some(points) = self.ban_points.get(&source_address.ip()) {
 						current_ban_points = points.clone()
@@ -2008,12 +2173,15 @@ impl Server {
 						self.banned_addresses.insert(source_address.ip());
 						continue;
 					}
-					if self.recent_packets.contains(&packet_hash) {
+					if self.recent_packets_set.contains(&packet_hash) {
 						continue;
 					} else {
-						self.recent_packets.push_back(packet_hash.clone());
-						while self.recent_packets.len() > self.max_recent_packets {
-							self.recent_packets.pop_front();
+						self.recent_packets_deque.push_back(packet_hash.clone());
+						self.recent_packets_set.insert(packet_hash.clone());
+						while self.recent_packets_deque.len() > self.max_recent_packets {
+							if let Some(removed_packet) = self.recent_packets_deque.pop_front() {
+								self.recent_packets_set.remove(&removed_packet);
+							}
 						}
 					}
 					let mut sender:String = String::new();
