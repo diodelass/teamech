@@ -2822,7 +2822,16 @@ impl Server {
 				for class in remote_con.classes.iter() {
 					con_identifiers.push_str(&format!("#{} ",class));
 				}
-				let matched:bool = wordmatch(&String::from_utf8_lossy(&packet.parameter[1..]).to_string(),&con_identifiers);
+				let routing_expression_bytes:Vec<u8>;
+				if packet.parameter.len() == 1 {
+					routing_expression_bytes = Vec::new();
+				} else if packet.parameter.len() >= 2 && packet.parameter[1] == 0x01 {
+					routing_expression_bytes = packet.parameter[2..].to_vec();
+				} else {
+					routing_expression_bytes = packet.parameter[1..].to_vec();
+				}
+				let routing_expression = String::from_utf8_lossy(&routing_expression_bytes).to_string();
+				let matched:bool = wordmatch(&routing_expression,&con_identifiers);
 				if matched || remote_con.classes.contains(&String::from("supervisor")) {
 					if let Ok((hash,bottle)) = gen_packet(&packet.sender,&packet.parameter,&packet.payload,&server.identity.tag,&identities) {
 						if send {
