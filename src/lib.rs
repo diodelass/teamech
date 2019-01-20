@@ -21,8 +21,8 @@ I. Network
 		1. IPv4																	[X]
 		2. IPv6																	[X]
 		3. DNS resolution												[-]
-	C. Bulk data/file transfers								[ ]
-		1. Transmission													[ ]
+	C. Bulk data/file transfers								[X]
+		1. Transmission													[X]
 		2. Reception														[X]
 II. Server																		
 	A. Connections														[X]
@@ -844,16 +844,27 @@ pub struct UnackedPacket {
 
 struct ReceivingTransmission {
 	id:Vec<u8>,
+	block_size:usize,
 	blocks_received:Vec<Vec<u8>>,
 	blocks_needed:HashSet<usize>,
+	sender:Vec<u8>,
 }
 
 struct SendingTransmission {
 	id:Vec<u8>,
+	block_size:usize,
 	blocks:VecDeque<Vec<u8>>,
 	length:usize,
 	position:usize,
 	routing_expression:Vec<u8>,
+}
+
+pub struct TransmissionStatus {
+	pub id:Vec<u8>,
+	pub length:usize,
+	pub	current:usize,
+	pub percent:u8,
+	pub remote:String,
 }
 
 // object representing a Teamech client, with methods for sending and receiving packets.
@@ -871,6 +882,7 @@ pub struct Client {
 	pub event_stream:VecDeque<Event>,																// log of events produced by the client
 	pub max_recent_packets:usize,																		// max number of recent packet hashes to store
 	pub max_resend_tries:u64,																				// maximum number of tries to resend a packet before discarding it
+	pub max_transmission_length:usize,															// maximum acceptible number of bytes in an incoming transmission (hint: set below mem limit)
 	pub time_tolerance_ms:i64,																			// maximum time difference a packet can have from now
 	pub simultaneous_transmissions:bool,														// whether or not multi-packet transmissions should be sent sequentially or simultaneously.
 }
@@ -904,6 +916,7 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 				sending_transmissions:VecDeque::new(),
 				max_recent_packets:32,
 				max_resend_tries:3,
+				max_transmission_length:4294967295,
 				identity:new_identity,
 				time_tolerance_ms:3000,
 				simultaneous_transmissions:true,
@@ -1226,8 +1239,20 @@ impl Client {
 									if received_packet.parameter.len() >= 26 && received_packet.parameter[1] == 0x01 {
 										let transmission_param = received_packet.parameter[received_packet.parameter.len()-24..].to_vec();
 										let transmission_id:Vec<u8> = transmission_param[..8].to_vec();
-										let transmission_position:usize = bytes_to_u64(&transmission_param[8..16].to_vec()) as usize;
-										let transmission_length:usize = bytes_to_u64(&transmission_param[16..].to_vec()) as usize;
+										let transmission_position_u64:u64 = bytes_to_u64(&transmission_param[8..16].to_vec());
+										let transmission_length_u64:u64 = bytes_to_u64(&transmission_param[16..].to_vec());
+										let transmission_position:usize;
+										let transmission_length:usize;
+										if transmission_length_u64*received_packet.payload.len() as u64 <= self.max_transmission_length as u64 {
+											transmission_position = transmission_position_u64 as usize;
+											transmission_length = transmission_length_u64 as usize;
+										} else {
+											match self.send_packet(&vec![0x15],&received_packet.hash) {
+												Err(why) => return Err(why),
+												Ok(_) => (),
+											};
+											continue;
+										}
 										let mut this_transmission = match self.receiving_transmissions.remove(&transmission_id) {
 											None => {
 												let mut blocks_needed:HashSet<usize> = HashSet::new();
@@ -1242,12 +1267,17 @@ impl Client {
 												});
 												ReceivingTransmission {
 													id:transmission_id.clone(),
+													block_size:received_packet.payload.len(),
 													blocks_received:vec![vec![];transmission_length],
 													blocks_needed:blocks_needed,
+													sender:received_packet.sender.clone(),
 												}
 											},
 											Some(transmission) => transmission,
 										};
+										if received_packet.payload.len() > this_transmission.block_size {
+											this_transmission.block_size = received_packet.payload.len();
+										}
 										if transmission_position < this_transmission.blocks_received.len() {
 											this_transmission.blocks_received[transmission_position] = received_packet.payload.clone();
 											this_transmission.blocks_needed.remove(&transmission_position);
@@ -1319,6 +1349,36 @@ impl Client {
 		return Ok(());
 	}
 
+	pub fn get_transmission_status(&self) -> (Vec<TransmissionStatus>,Vec<TransmissionStatus>) {
+		let mut receiving:Vec<TransmissionStatus> = Vec::new();
+		for transmission in self.receiving_transmissions.values() {
+			let transmission_length_bytes = transmission.blocks_received.len()*transmission.block_size;
+			let transmission_current_bytes = (transmission.blocks_received.len()-transmission.blocks_needed.len())*transmission.block_size;
+			let percent = ((transmission_current_bytes*100)/transmission_length_bytes) as u8;
+			receiving.push(TransmissionStatus {
+				id:transmission.id.clone(),
+				length:transmission_length_bytes,
+				current:transmission_current_bytes,
+				percent:percent,
+				remote:String::from_utf8_lossy(&transmission.sender).to_string(),
+			});
+		}
+		let mut sending:Vec<TransmissionStatus> = Vec::new();
+		for transmission in self.sending_transmissions.iter() {
+			let transmission_length_bytes = transmission.length*transmission.block_size;
+			let transmission_current_bytes = transmission.position*transmission.block_size;
+			let percent = ((transmission_current_bytes*100)/transmission_length_bytes) as u8;
+			sending.push(TransmissionStatus {
+				id:transmission.id.clone(),
+				length:transmission_length_bytes,
+				current:transmission_current_bytes,
+				percent:percent,
+				remote:String::from_utf8_lossy(&transmission.routing_expression).to_string(),
+			});
+		}
+		return (sending,receiving);
+	}
+
 	pub fn transmit_data(&mut self,routing_expression:&Vec<u8>,data:&Vec<u8>) -> Result<(),io::Error> {
 		// max UDP payload size: 508 bytes
 		// teacrypt overhead: 32 bytes
@@ -1343,6 +1403,7 @@ impl Client {
 		let transmission_length = blocks.len();
 		self.sending_transmissions.push_back(SendingTransmission {
 			id:transmission_id.clone(),
+			block_size:block_size,
 			blocks:blocks,
 			position:0,
 			length:transmission_length,
