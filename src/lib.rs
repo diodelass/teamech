@@ -8,7 +8,23 @@
 // - Window width: 160 chars
 
 /*
-Feature Outline
+-- What we're working on now --
+
+Problem:
+Multipacket transmissions should stop when there are no recipients available or all have aborted the receive operation.
+
+Plan: 
+Server keeps track of all transmissions.
+Server stops relaying packets from a transmission to clients that have previously nakked the transmission.
+If all matching clients nak the transmission, then the server returns 0x03 and the transmitting client stops transmitting.
+
+Done So Far:
+- server now has a structure to keep track of transmissions
+
+*/
+
+/*
+-- Feature Outline --
 
 Functionality														Implemented
 
@@ -541,6 +557,13 @@ pub enum Event {
 		id:Vec<u8>,
 		timestamp:Tm,
 	},
+	FailedSendTransmission {
+		destination:String,
+		size:usize,
+		id:Vec<u8>,
+		reason:String,
+		timestamp:Tm,
+	}
 	BeginReceiveTransmission {
 		sender:String,
 		size:usize,
@@ -743,6 +766,9 @@ impl Event {
 			},
 			Event::EndSendTransmission {timestamp,destination,size,id} => {
 				return format!("[{}] Finished sending transmission [{}] ({} blocks) to {}",print_time(&timestamp),view_bytes(&id),size,destination);
+			},
+			Event::FailedSendTransmission {timestamp,destination,size,id,reason} => {
+				return format!("[{}] Failed to send transmission [{}] ({} blocks) to {}: {}",print_time(&timestamp),view_bytes(&id),size,destination,reason);
 			},
 			Event::BeginReceiveTransmission {timestamp,sender,size,id} => {
 				return format!("[{}] Receiving transmission [{}] ({} blocks) from {}",print_time(&timestamp),view_bytes(&id),size,sender);
@@ -1816,6 +1842,15 @@ pub struct RemoteConnection {
 	pub unacked_packets:HashMap<Vec<u8>,UnackedPacket>,		// the packets awaiting acknowledgement by this client
 }
 
+struct ServerTransmission {
+	id:Vec<u8>,
+	origin:SocketAddr,
+	routing_expression:Vec<u8>,
+	length:usize,
+	blocks_relayed:HashSet<usize>,
+	failed_recipients:HashSet<SocketAddr>,
+}
+
 // server object for holding server parameters and connections.
 pub struct Server {
 	socket:UdpSocket,																									// this server's UDP socket
@@ -1823,6 +1858,7 @@ pub struct Server {
 	names_in_use:HashSet<String>,																			// identity names that are in use and not available to new connections
 	recent_packets_deque:VecDeque<Vec<u8>>,														// packets recently seen, for filtering replays
 	recent_packets_set:HashSet<Vec<u8>>,															// same contents as recent_packets_deque, but can be constant-time indexed
+	relaying_transmissions:HashMap<Vec<u8>,ServerTransmission>				// transmissions being relayed by this server
 	pub name:String,																									// this server's unique name
 	pub address:SocketAddr,																						// this server's socket address
 	pub identity:Identity,																						// this server's identity, for connecting to other servers
@@ -1875,6 +1911,7 @@ pub fn new_server(identity_file:&Path,port:&u16) -> Result<Server,io::Error> {
 				socket:socket,
 				client_connections:HashMap::new(),
 				server_connections:HashMap::new(),
+				relaying_transmissions:HashSet::new(),
 				unacked_packets:HashMap::new(),
 				identity:server_identity.clone(),
 				identities:HashMap::new(),
