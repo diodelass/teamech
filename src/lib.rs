@@ -84,7 +84,7 @@ V. Logging																	[X]
 */
 
 /* Overview of Control Codes
-0x01 - START OF HEADING - Bulk transmission segment
+0x01 - START OF HEADING - Unassigned
 0x02 - START OF TEXT - Connection request
 0x03 - END OF TEXT - Match test response
 0x04 - END OF TRANSMISSION - Connected client list response
@@ -111,9 +111,9 @@ V. Logging																	[X]
 0x19 - END OF MEDIUM - Connection dismissal
 0x1A - SUBSTITUTE - Unassigned
 0x1B - ESCAPE - Unassigned
-0x1C - FILE SEPARATOR - Unassigned
-0x1D - GROUP SEPARATOR - Unassigned
-0x1E - RECORD SEPARATOR - Unassigned
+0x1C - FILE SEPARATOR - Request to start bulk transfer
+0x1D - GROUP SEPARATOR - Clearance to start bulk transfer
+0x1E - RECORD SEPARATOR - Bulk transfer segment
 0x1F - UNIT SEPARATOR - Unassigned
 */
 
@@ -563,7 +563,7 @@ pub enum Event {
 		id:Vec<u8>,
 		reason:String,
 		timestamp:Tm,
-	}
+	},
 	BeginReceiveTransmission {
 		sender:String,
 		size:usize,
@@ -870,15 +870,13 @@ pub struct UnackedPacket {
 
 struct ReceivingTransmission {
 	id:Vec<u8>,
-	block_size:usize,
 	blocks_received:Vec<Vec<u8>>,
-	blocks_needed:HashSet<usize>,
+	blocks_needed:Vec<usize>,
 	sender:Vec<u8>,
 }
 
 struct SendingTransmission {
 	id:Vec<u8>,
-	block_size:usize,
 	blocks:VecDeque<Vec<u8>>,
 	length:usize,
 	position:usize,
@@ -896,6 +894,7 @@ pub struct TransmissionStatus {
 // object representing a Teamech client, with methods for sending and receiving packets.
 pub struct Client {
 	receiving_transmissions:HashMap<Vec<u8>,ReceivingTransmission>,	// contains the multi-packet transfers currently being received by the client.
+	waiting_sending_transmissions:HashMap<Vec<u8>,SendingTransmission>, // transmissions that have not yet been cleared to send by the server
 	sending_transmissions:VecDeque<SendingTransmission>,						// contains the multi-packet transfers currently being sent by the client.
 	socket:UdpSocket,																								// local socket for transceiving data
 	last_number_matched:VecDeque<([u8;8],u64)>,											// tracks ack match-count reporting
@@ -939,6 +938,7 @@ pub fn new_client(identity_path:&Path,server_address:&IpAddr,remote_port:u16,loc
 				unacked_packets:HashMap::new(),
 				recent_packets:VecDeque::new(),
 				receiving_transmissions:HashMap::new(),
+				waiting_sending_transmissions:HashMap::new(),
 				sending_transmissions:VecDeque::new(),
 				max_recent_packets:32,
 				max_resend_tries:3,
@@ -1051,9 +1051,6 @@ impl Client {
 		};
 	}
 
-	// Collect packets from the server and append them to our receive_queue.
-	// The WouldBlock errors resulting from no new packets being available are suppressed,
-	// so they do not need to be handled in the implementation code.
 	pub fn process_packets(&mut self) -> Result<(),io::Error> {
 		let mut input_buffer:[u8;8192] = [0;8192];
 		let mut recv_count:usize = 0;
@@ -1065,11 +1062,9 @@ impl Client {
 				break;
 			}
 			if let Some(mut transmission) = self.sending_transmissions.pop_front() {
-				let mut parameter:Vec<u8> = vec![b'>',0x01];
-				parameter.append(&mut transmission.routing_expression.clone());
+				let mut parameter:Vec<u8> = vec![0x1E];
 				parameter.append(&mut transmission.id.clone());
 				parameter.append(&mut u64_to_bytes(&(transmission.position as u64)).to_vec());
-				parameter.append(&mut u64_to_bytes(&(transmission.length as u64)).to_vec());
 				if let Some(block) = transmission.blocks.pop_front() {
 					match self.send_packet(&parameter,&block) {
 						Err(why) => return Err(why),
@@ -1253,6 +1248,76 @@ impl Client {
 										timestamp:now_utc(),
 									});
 								},
+								(0x1C,16) => {
+									let transmission_id:Vec<u8> = received_packet.payload[..8].to_vec();
+									let transmission_length:usize = bytes_to_u64(&received_packet.payload[8..].to_vec()) as usize;
+									if transmission_length*400 > self.max_transmission_length {
+										match self.send_packet(&vec![0x15],&received_packet.hash) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+										continue;
+									}
+									self.event_stream.push_back(Event::BeginReceiveTransmission {
+										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+										size:transmission_length,
+										id:transmission_id.clone(),
+										timestamp:now_utc(),
+									});
+									self.receiving_transmissions.insert(transmission_id.clone(),ReceivingTransmission {
+										id:transmission_id.clone(),
+										blocks_received:vec![vec![];transmission_length],
+										blocks_needed:(0..transmission_length).collect(),
+										sender:received_packet.sender.clone(),
+									});
+								},
+								(0x1D,8) => {
+									let transmission = match self.waiting_sending_transmissions.remove(&received_packet.payload) {
+										None => continue,
+										Some(transmission) => transmission,
+									};
+									self.sending_transmissions.push_front(transmission);
+								},
+								(0x1E,_) => {
+									let transmission_id:Vec<u8> = received_packet.parameter[1..9].to_vec();
+									let transmission_position:usize = bytes_to_u64(&received_packet.parameter[9..].to_vec()) as usize;
+									let mut this_transmission = match self.receiving_transmissions.remove(&transmission_id) {
+										None => {
+											match self.send_packet(&vec![0x15],&received_packet.hash) {
+												Err(why) => return Err(why),
+												Ok(_) => (),
+											};
+											continue;
+										},
+										Some(transmission) => transmission,
+									};
+									if transmission_position < this_transmission.blocks_received.len() {
+										this_transmission.blocks_received[transmission_position] = received_packet.payload.clone();
+										if let Ok(n) = this_transmission.blocks_needed.binary_search(&transmission_position) {
+											this_transmission.blocks_needed.remove(n);
+										}
+										match self.send_packet(&vec![0x06],&received_packet.hash) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+									} else {
+										match self.send_packet(&vec![0x15],&received_packet.hash) {
+											Err(why) => return Err(why),
+											Ok(_) => (),
+										};
+									}
+									if this_transmission.blocks_needed.len() > 0 {
+										self.receiving_transmissions.insert(this_transmission.id.clone(),this_transmission);
+									} else {
+										self.event_stream.push_back(Event::EndReceiveTransmission {
+											sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
+											size:this_transmission.blocks_received.len(),
+											data:this_transmission.blocks_received.concat(),
+											id:transmission_id.clone(),
+											timestamp:now_utc(),
+										});
+									}
+								},
 								(b'>',_) => {
 									self.event_stream.push_back(Event::ReceiveMessage {
 										sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
@@ -1263,71 +1328,6 @@ impl Client {
 										timestamp:now_utc(),
 									});
 									if received_packet.parameter.len() >= 26 && received_packet.parameter[1] == 0x01 {
-										let transmission_param = received_packet.parameter[received_packet.parameter.len()-24..].to_vec();
-										let transmission_id:Vec<u8> = transmission_param[..8].to_vec();
-										let transmission_position_u64:u64 = bytes_to_u64(&transmission_param[8..16].to_vec());
-										let transmission_length_u64:u64 = bytes_to_u64(&transmission_param[16..].to_vec());
-										let transmission_position:usize;
-										let transmission_length:usize;
-										if transmission_length_u64*received_packet.payload.len() as u64 <= self.max_transmission_length as u64 {
-											transmission_position = transmission_position_u64 as usize;
-											transmission_length = transmission_length_u64 as usize;
-										} else {
-											match self.send_packet(&vec![0x15],&received_packet.hash) {
-												Err(why) => return Err(why),
-												Ok(_) => (),
-											};
-											continue;
-										}
-										let mut this_transmission = match self.receiving_transmissions.remove(&transmission_id) {
-											None => {
-												let mut blocks_needed:HashSet<usize> = HashSet::new();
-												for x in 0..transmission_length {
-													blocks_needed.insert(x);
-												}
-												self.event_stream.push_back(Event::BeginReceiveTransmission {
-													sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-													size:transmission_length,
-													id:transmission_id.clone(),
-													timestamp:now_utc(),
-												});
-												ReceivingTransmission {
-													id:transmission_id.clone(),
-													block_size:received_packet.payload.len(),
-													blocks_received:vec![vec![];transmission_length],
-													blocks_needed:blocks_needed,
-													sender:received_packet.sender.clone(),
-												}
-											},
-											Some(transmission) => transmission,
-										};
-										if received_packet.payload.len() > this_transmission.block_size {
-											this_transmission.block_size = received_packet.payload.len();
-										}
-										if transmission_position < this_transmission.blocks_received.len() {
-											this_transmission.blocks_received[transmission_position] = received_packet.payload.clone();
-											this_transmission.blocks_needed.remove(&transmission_position);
-											match self.send_packet(&vec![0x06],&received_packet.hash) {
-												Err(why) => return Err(why),
-												Ok(_) => (),
-											};
-										} else {
-											match self.send_packet(&vec![0x15],&received_packet.hash) {
-												Err(why) => return Err(why),
-												Ok(_) => (),
-											};
-										}
-										if this_transmission.blocks_needed.len() > 0 {
-											self.receiving_transmissions.insert(this_transmission.id.clone(),this_transmission);
-										} else {
-											self.event_stream.push_back(Event::EndReceiveTransmission {
-												sender:String::from_utf8_lossy(&received_packet.sender).to_string(),
-												size:transmission_length,
-												data:this_transmission.blocks_received.concat(),
-												id:transmission_id.clone(),
-												timestamp:now_utc(),
-											});
-										}
 									}
 								},
 								(_,_) => {
@@ -1378,8 +1378,8 @@ impl Client {
 	pub fn get_transmission_status(&self) -> (Vec<TransmissionStatus>,Vec<TransmissionStatus>) {
 		let mut receiving:Vec<TransmissionStatus> = Vec::new();
 		for transmission in self.receiving_transmissions.values() {
-			let transmission_length_bytes = transmission.blocks_received.len()*transmission.block_size;
-			let transmission_current_bytes = (transmission.blocks_received.len()-transmission.blocks_needed.len())*transmission.block_size;
+			let transmission_length_bytes = transmission.blocks_received.len()*400;
+			let transmission_current_bytes = (transmission.blocks_received.len()-transmission.blocks_needed.len())*400;
 			let percent = ((transmission_current_bytes*100)/transmission_length_bytes) as u8;
 			receiving.push(TransmissionStatus {
 				id:transmission.id.clone(),
@@ -1391,8 +1391,8 @@ impl Client {
 		}
 		let mut sending:Vec<TransmissionStatus> = Vec::new();
 		for transmission in self.sending_transmissions.iter() {
-			let transmission_length_bytes = transmission.length*transmission.block_size;
-			let transmission_current_bytes = transmission.position*transmission.block_size;
+			let transmission_length_bytes = transmission.length*400;
+			let transmission_current_bytes = transmission.position*400;
 			let percent = ((transmission_current_bytes*100)/transmission_length_bytes) as u8;
 			sending.push(TransmissionStatus {
 				id:transmission.id.clone(),
@@ -1408,12 +1408,18 @@ impl Client {
 	pub fn transmit_data(&mut self,routing_expression:&Vec<u8>,data:&Vec<u8>) -> Result<(),io::Error> {
 		// max UDP payload size: 508 bytes
 		// teacrypt overhead: 32 bytes
-		// multi-packet ordering information overhead: 24 bytes
-		// parameter flags: 2 bytes
-		// routing expression: variable length
-		// absolute maximum transmission block size (with zero-length routing expression): 450 bytes
-		// safety margin: 50 bytes
-		if routing_expression.len() >= 400 {
+		// multi-packet ordering information overhead: 16 bytes
+		// parameter: 1 byte
+		// absolute maximum transmission block size (with zero-length routing expression): 459 bytes
+		// safety margin: 59 bytes
+		// block size: 400 bytes
+		let block_size:usize = 400;
+		// previously we used a scheme that involved putting the routing expression on every packet,
+		// meaning that the transmission block size was variable.
+		// that was kind of silly. the current plan is to have the server store the routing expression
+		// and reference it using the transmission ID. 
+		// now packets have a fixed overhead: 8 bytes of ID and 8 bytes of block position.
+		if routing_expression.len() >= block_size {
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"routing expression too long"));
 		}
 		let mut transmission_id:Vec<u8> = vec![0;8];
@@ -1421,20 +1427,27 @@ impl Client {
 			Err(why) => return Err(why),
 			Ok(_) => (),
 		};
-		let block_size:usize = 400-routing_expression.len();
 		let mut blocks:VecDeque<Vec<u8>> = VecDeque::with_capacity(1+data.len()/block_size);
 		for block in data.chunks(block_size) {
 			blocks.push_back(block.to_vec());
 		}
 		let transmission_length = blocks.len();
-		self.sending_transmissions.push_back(SendingTransmission {
+		self.waiting_sending_transmissions.insert(transmission_id.clone(),SendingTransmission {
 			id:transmission_id.clone(),
-			block_size:block_size,
 			blocks:blocks,
 			position:0,
 			length:transmission_length,
 			routing_expression:routing_expression.clone(),
 		});
+		let mut routing_parameter:Vec<u8> = vec![0x1C];
+		routing_parameter.append(&mut routing_expression.clone());
+		let mut transmission_specs:Vec<u8> = Vec::new();
+		transmission_specs.append(&mut transmission_id.clone());
+		transmission_specs.append(&mut u64_to_bytes(&(transmission_length as u64)).to_vec());
+		match self.send_packet(&routing_parameter,&transmission_specs) {
+			Err(why) => return Err(why),
+			Ok(_) => (),
+		};
 		self.event_stream.push_back(Event::BeginSendTransmission {
 			destination:String::from_utf8_lossy(&routing_expression).to_string(),
 			size:transmission_length,
@@ -1843,12 +1856,12 @@ pub struct RemoteConnection {
 }
 
 struct ServerTransmission {
-	id:Vec<u8>,
-	origin:SocketAddr,
-	routing_expression:Vec<u8>,
-	length:usize,
-	blocks_relayed:HashSet<usize>,
-	failed_recipients:HashSet<SocketAddr>,
+	id:Vec<u8>,																	// this transmission's unique identifier
+	origin:SocketAddr,													// the address of the transmitting client
+	routing_expression:String,									// the routing expression used to select receivers
+	length:usize,																// the number of blocks in this transmission
+	blocks_needed:Vec<usize>,										// the blocks that have not yet been relayed 
+	failed_recipients:HashSet<SocketAddr>,			// the recipients of this transmission who match the routing expression but have rejected it
 }
 
 // server object for holding server parameters and connections.
@@ -1858,7 +1871,7 @@ pub struct Server {
 	names_in_use:HashSet<String>,																			// identity names that are in use and not available to new connections
 	recent_packets_deque:VecDeque<Vec<u8>>,														// packets recently seen, for filtering replays
 	recent_packets_set:HashSet<Vec<u8>>,															// same contents as recent_packets_deque, but can be constant-time indexed
-	relaying_transmissions:HashMap<Vec<u8>,ServerTransmission>				// transmissions being relayed by this server
+	relaying_transmissions:HashMap<Vec<u8>,ServerTransmission>,				// transmissions being relayed by this server
 	pub name:String,																									// this server's unique name
 	pub address:SocketAddr,																						// this server's socket address
 	pub identity:Identity,																						// this server's identity, for connecting to other servers
@@ -1911,7 +1924,7 @@ pub fn new_server(identity_file:&Path,port:&u16) -> Result<Server,io::Error> {
 				socket:socket,
 				client_connections:HashMap::new(),
 				server_connections:HashMap::new(),
-				relaying_transmissions:HashSet::new(),
+				relaying_transmissions:HashMap::new(),
 				unacked_packets:HashMap::new(),
 				identity:server_identity.clone(),
 				identities:HashMap::new(),
@@ -2752,11 +2765,30 @@ impl Server {
 									}
 								}
 							},
+							(0x1C,16) => {
+								let received_id = received_packet.payload[..8].to_vec();
+								let received_length = bytes_to_u64(&received_packet.payload[8..]) as usize;
+								let routing_expression = String::from_utf8_lossy(&received_packet.parameter[1..]).to_string();
+								self.relaying_transmissions.insert(received_id.clone(),ServerTransmission {
+									id:received_id,
+									origin:received_packet.source.clone(),
+									length:received_length,
+									routing_expression:routing_expression.clone(),
+									blocks_needed:(0..received_length).collect(),
+									failed_recipients:HashSet::new(),
+								});
+								match self.relay_packet(&routing_expression,&received_packet) {
+									Err(why) => return Err(why),
+									Ok(_) => (),
+								};
+							},
+							(0x1E,_) => {
+								
+							},
 							(b'>',_) => {
-								if received_packet.valid {
-									// none of the basic error conditions (invalid packet, no parameter) will throw from relay_packet when called
-									// here; only true system failures to transmit.
-									match self.relay_packet(&received_packet) {
+								if received_packet.valid && received_packet.parameter.len() >= 1 {
+									let routing_expression = String::from_utf8_lossy(&received_packet.parameter[1..]).to_string();
+									match self.relay_packet(&routing_expression,&received_packet) {
 										Err(why) => return Err(why),
 										Ok(_) => (),
 									};
@@ -2897,28 +2929,16 @@ impl Server {
 		return Ok(());
 	}
 
-	pub fn relay_packet(&mut self,packet:&Packet) -> Result<(),io::Error> {
+	pub fn relay_packet(&mut self,routing_expression:&str,packet:&Packet) -> Result<(),io::Error> {
 		let server_id:Vec<u8> = format!("@{}/#server",self.name).as_bytes().to_vec();
 		if !packet.valid {
 			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay invalid packet"));
-		}
-		if packet.parameter.len() < 1 {
-			return Err(io::Error::new(io::ErrorKind::InvalidData,"cannot relay packet with missing parameter"));
 		}
 		let identities = self.identities.clone();
 		let mut dest_addresses:HashSet<SocketAddr> = HashSet::new();
 		let mut outbound_packets:Vec<(Vec<u8>,Vec<u8>,SocketAddr)> = Vec::new();
 		let mut match_count:u64 = 0;
 		let send:bool = packet.payload.len() > 0;
-		let routing_expression_bytes:Vec<u8>;
-		if packet.parameter.len() == 1 {
-			routing_expression_bytes = Vec::new();
-		} else if packet.parameter.len() >= 2 && packet.parameter[1] == 0x01 {
-			routing_expression_bytes = packet.parameter[2..].to_vec();
-		} else {
-			routing_expression_bytes = packet.parameter[1..].to_vec();
-		}
-		let routing_expression = String::from_utf8_lossy(&routing_expression_bytes).to_string();
 		for server in self.server_connections.values_mut() {
 			if server.address == packet.source {
 				continue;
